@@ -10,12 +10,6 @@ from backend.app.main import app
 from backend.app.services.band_adapter import MockBandAdapter
 
 
-@pytest.fixture
-def client():
-    """Provides a synchronous FastAPI TestClient."""
-    return TestClient(app)
-
-
 def test_root_endpoint(client):
     response = client.get("/")
     assert response.status_code == 200

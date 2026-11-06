@@ -1,21 +1,26 @@
 """
 Incidents API Router.
 Handles:
-- POST /api/incidents/{id}/triage (SSE Stream)
-- POST /api/incidents/{id}/feedback (Human-in-the-loop)
-- POST /api/incidents/{id}/resolve (Resolution & postmortem)
-- GET /api/incidents/{id}/memories (Memory Panel feed)
+- POST /api/incidents/{id}/triage (Real AI ReAct SSE Stream + ?memory=on|off + engineer preference)
+- POST /api/incidents/{id}/feedback (PostgreSQL persistence + Hindsight negative/preference retention)
+- POST /api/incidents/{id}/resolve (PostgreSQL resolution + Hindsight organizational postmortem retention)
+- GET /api/incidents/{id}/memories (Memory Panel feed from unified dual memory)
 """
 
 import asyncio
 from datetime import datetime, timezone
-from typing import AsyncGenerator
-from fastapi import APIRouter, Query, status
+import logging
+from typing import AsyncGenerator, Optional
+
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.alerts import ACTIVE_INCIDENTS
 from backend.app.core.exceptions import IncidentNotFoundError
 from backend.app.core.sse import SSEEventTypes, format_sse
+from backend.app.db.repository import SQLAlchemyRepository
+from backend.app.db.session import get_db_session
 from backend.app.schemas.api_models import (
     FeedbackCreateRequest,
     FeedbackCreateResponse,
@@ -23,157 +28,14 @@ from backend.app.schemas.api_models import (
     ResolveIncidentRequest,
     ResolveIncidentResponse,
 )
+from backend.app.services.band_adapter import band_adapter
+from backend.app.services.groq_agent import GroqAgent
+from backend.app.services.hindsight_service import hindsight_service
+from backend.app.services.tool_handlers import AgentToolDispatcher
+
+logger = logging.getLogger("recallops.api.incidents")
 
 router = APIRouter(prefix="/incidents", tags=["Incidents"])
-
-
-async def generate_mock_triage_stream(
-    incident_id: str,
-    memory_enabled: bool,
-) -> AsyncGenerator[str, None]:
-    """
-    Generates deterministic SSE event stream for Phase 0 frontend unblocking.
-    Demonstrates the difference between Memory ON and Memory OFF.
-    """
-    # 1. Initial Thought
-    yield format_sse(
-        SSEEventTypes.THOUGHT,
-        {
-            "step": 1,
-            "content": f"Alert received for {incident_id}. Fetching telemetry logs and checking recent releases...",
-            "mode": "mock_p0",
-        },
-    )
-    await asyncio.sleep(0.05)
-
-    # 2. Tool Call: get_logs
-    yield format_sse(
-        SSEEventTypes.TOOL_CALL,
-        {
-            "tool": "get_logs",
-            "arguments": {"service_name": "checkout-api", "incident_id": incident_id, "limit": 50},
-        },
-    )
-    await asyncio.sleep(0.05)
-
-    # 3. Tool Result: get_logs
-    yield format_sse(
-        SSEEventTypes.TOOL_RESULT,
-        {
-            "tool": "get_logs",
-            "summary": "15 ERROR traces found: ConnectionPoolExhausted. Active pool size: 200/200.",
-        },
-    )
-    await asyncio.sleep(0.05)
-
-    # 4. Tool Call: get_recent_deploys
-    yield format_sse(
-        SSEEventTypes.TOOL_CALL,
-        {
-            "tool": "get_recent_deploys",
-            "arguments": {"service_name": "checkout-api", "lookback_hours": 24},
-        },
-    )
-    await asyncio.sleep(0.05)
-
-    yield format_sse(
-        SSEEventTypes.TOOL_RESULT,
-        {
-            "tool": "get_recent_deploys",
-            "summary": "Release v2.4.1 deployed 22 minutes ago by @dev-rahul (commit a9f4c12).",
-        },
-    )
-    await asyncio.sleep(0.05)
-
-    if memory_enabled:
-        # 5. Tool Call: recall_similar_incidents
-        yield format_sse(
-            SSEEventTypes.TOOL_CALL,
-            {
-                "tool": "recall_similar_incidents",
-                "arguments": {"service_name": "checkout-api", "symptom": "Connection pool full", "limit": 3},
-            },
-        )
-        await asyncio.sleep(0.05)
-
-        # 6. Recalled Memory Event (standardized memory_hit event)
-        memory_payload = {
-            "memory_type": "episodic_resolution",
-            "incident_id": "INC-1987",
-            "similarity": 0.94,
-            "relative_time": "6 weeks ago",
-            "symptom": "FATAL: remaining connection slots are reserved for non-replication superuser connections",
-            "root_cause": "Unindexed query in orders table during campaign traffic spike",
-            "successful_fix": "Rolled back pool changes and applied PgBouncer pooler cap.",
-        }
-        yield format_sse(SSEEventTypes.MEMORY_HIT, memory_payload)
-        yield format_sse(SSEEventTypes.RECALLED_MEMORY, memory_payload)
-        await asyncio.sleep(0.05)
-
-        # 7. Tool Call: recall_failed_fixes
-        yield format_sse(
-            SSEEventTypes.TOOL_CALL,
-            {
-                "tool": "recall_failed_fixes",
-                "arguments": {"service_name": "payments-db", "incident_signature": "ConnectionPoolExhausted"},
-            },
-        )
-        await asyncio.sleep(0.05)
-
-        # 8. Negative Memory Warning
-        yield format_sse(
-            SSEEventTypes.WARNING,
-            {
-                "type": "negative_memory_block",
-                "directive": "Do NOT restart payments-db: failed 2x in Sept (INC-1987). Cold cache cleared buffer pool causing 100% disk thrashing.",
-            },
-        )
-        await asyncio.sleep(0.05)
-
-        # 9. Suggestion (Targeted SRE Resolution)
-        yield format_sse(
-            SSEEventTypes.SUGGESTION,
-            {
-                "incident_id": incident_id,
-                "hypothesis": "Database connection pool exhaustion caused by unindexed query introduced in release v2.4.1.",
-                "confidence": 0.94,
-                "cited_incident_ids": ["INC-1987"],
-                "failed_fixes_warning": [
-                    "Do NOT restart payments-db: failed 2x in Sept and caused cascade outage",
-                ],
-                "recommended_action": "Rollback checkout-api to release v2.4.0 and apply hotfix index on orders.customer_id.",
-                "likely_owner": "payments-platform-team (@alice-sre)",
-                "memory_augmented": True,
-            },
-        )
-    else:
-        # Memory Disabled: Generic Naive Baseline
-        yield format_sse(
-            SSEEventTypes.SUGGESTION,
-            {
-                "incident_id": incident_id,
-                "hypothesis": "Possible high CPU or connection congestion.",
-                "confidence": 0.45,
-                "cited_incident_ids": [],
-                "failed_fixes_warning": [],
-                "recommended_action": "Restart checkout-api pods and scale replica count.",
-                "likely_owner": "on-call-generalist",
-                "memory_augmented": False,
-            },
-        )
-
-    await asyncio.sleep(0.05)
-    # 10. Done Event
-    yield format_sse(
-        SSEEventTypes.DONE,
-        {
-            "incident_id": incident_id,
-            "status": "completed",
-            "duration_ms": 320,
-            "memory_enabled": memory_enabled,
-            "mode": "mock_p0",
-        },
-    )
 
 
 @router.post(
@@ -183,6 +45,8 @@ async def generate_mock_triage_stream(
 async def triage_incident(
     incident_id: str,
     memory: str = Query(default="on", pattern="^(on|off)$", description="Toggle Hindsight memory augmentation"),
+    engineer_id: Optional[str] = Query(default=None, description="Optional engineer ID for personalized workflow preferences"),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """
     Initiates the Autonomous SRE Agent triage loop over Server-Sent Events (SSE).
@@ -190,8 +54,62 @@ async def triage_incident(
     and final actionable remediation plans.
     """
     memory_enabled = (memory.lower() == "on")
+    repo = SQLAlchemyRepository(session)
+    dispatcher = AgentToolDispatcher(db_repo=repo, hindsight=hindsight_service, band=band_adapter)
+    agent = GroqAgent(tool_dispatcher=dispatcher, db_repo=repo, hindsight=hindsight_service)
+
+    # 1. Resolve incident telemetry context
+    inc_data = await repo.get_incident(incident_id)
+    if inc_data:
+        service_name = inc_data.get("service_name") or "checkout-api"
+        symptom = inc_data.get("symptom") or "Service latency degradation and error spike"
+    else:
+        active = ACTIVE_INCIDENTS.get(incident_id, {})
+        service_name = active.get("service_name", "checkout-api")
+        symptom = active.get("symptom", "HTTP 500 spike and p99 latency > 2.5s post release v2.4.1")
+
+    async def event_generator():
+        try:
+            async for event_type, data in agent.stream_triage_loop(
+                incident_id=incident_id,
+                service_name=service_name,
+                symptom=symptom,
+                memory_enabled=memory_enabled,
+                engineer_id=engineer_id,
+            ):
+                # Standard event emission
+                yield format_sse(event_type, data)
+
+                # Emit backward-compatible event for memory_hit
+                if event_type == "memory_hit":
+                    yield format_sse("recalled_memory", data)
+
+                # Record agent suggestion in DB for metrics tracking
+                if event_type == "suggestion":
+                    try:
+                        await repo.record_agent_suggestion(
+                            incident_code=incident_id,
+                            suggestion={
+                                "hypothesis": data.get("hypothesis", ""),
+                                "rank": 1,
+                                "memory_on": memory_enabled,
+                            },
+                        )
+                    except Exception as err:
+                        logger.warning(f"Could not persist agent suggestion to DB: {err}")
+
+        except asyncio.CancelledError:
+            logger.info(f"SSE client disconnected for incident {incident_id}")
+            raise
+        except Exception as e:
+            logger.error(f"Error in triage SSE stream for {incident_id}: {e}", exc_info=True)
+            yield format_sse(
+                "error",
+                {"incident_id": incident_id, "error": f"Triage loop error: {str(e)}"},
+            )
+
     return StreamingResponse(
-        generate_mock_triage_stream(incident_id, memory_enabled),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -210,30 +128,98 @@ async def triage_incident(
 async def submit_feedback(
     incident_id: str,
     payload: FeedbackCreateRequest,
+    session: AsyncSession = Depends(get_db_session),
 ) -> FeedbackCreateResponse:
     """
     Records engineer feedback (worked, failed, partial).
-    If outcome is 'failed', marks for negative-memory retention into Hindsight.
+    Persists feedback to PostgreSQL fix_attempts.
+    If outcome is 'failed', retains anti-pattern into Hindsight negative memory (kartly-sre).
+    If explicit engineer_preference is provided, retains in engineer-{engineer_id}.
     """
-    incident = ACTIVE_INCIDENTS.get(incident_id)
-    if not incident:
-        # For mock testing, allow feedback on known sample IDs
-        ACTIVE_INCIDENTS[incident_id] = {"id": incident_id, "feedback": []}
-        incident = ACTIVE_INCIDENTS[incident_id]
+    repo = SQLAlchemyRepository(session)
+    persisted_to_db = False
+    negative_retained = False
+    preference_retained = False
+    db_error = None
+    hindsight_error = None
 
-    negative_retained = (payload.outcome == "failed")
+    by_engineer_int: Optional[int] = None
+    if payload.engineer_id:
+        try:
+            if payload.engineer_id.isdigit():
+                by_engineer_int = int(payload.engineer_id)
+            elif payload.engineer_id.startswith("engineer-") and payload.engineer_id.split("-")[1].isdigit():
+                by_engineer_int = int(payload.engineer_id.split("-")[1])
+        except Exception:
+            pass
+
+    # 1. Persist fix attempt in PostgreSQL
+    try:
+        persisted_to_db = await repo.record_fix_attempt(
+            incident_code=incident_id,
+            suggestion_id=payload.suggestion_id,
+            action=payload.attempted_action or "Remediation attempt",
+            outcome=payload.outcome,
+            by_engineer=by_engineer_int,
+            note=payload.note,
+        )
+    except Exception as e:
+        logger.error(f"Database error persisting fix attempt: {e}")
+        db_error = str(e)
+        persisted_to_db = False
+
+    # Mirror in ephemeral registry for offline mock fallback
+    incident = ACTIVE_INCIDENTS.setdefault(incident_id, {"id": incident_id, "feedback": []})
     incident.setdefault("feedback", []).append({
         "suggestion_id": payload.suggestion_id,
         "outcome": payload.outcome,
         "attempted_action": payload.attempted_action,
         "note": payload.note,
+        "engineer_id": payload.engineer_id,
         "timestamp": datetime.now(timezone.utc),
     })
+
+    # 2. Retain organizational fix outcome in kartly-sre (especially failed fixes)
+    if payload.outcome == "failed":
+        try:
+            inc = await repo.get_incident(incident_id) or ACTIVE_INCIDENTS.get(incident_id, {})
+            svc = inc.get("service_name", "checkout-api")
+            sym = inc.get("symptom", "Service degradation")
+            neg_ok = await hindsight_service.remember_fix_outcome(
+                service_name=svc,
+                incident_signature=sym,
+                attempted_action=payload.attempted_action or "Attempted action",
+                failure_mode=payload.note or f"Action marked as failed on incident {incident_id}",
+                outcome="failed",
+            )
+            negative_retained = bool(neg_ok)
+        except Exception as e:
+            logger.error(f"Hindsight negative memory retention failed: {e}")
+            hindsight_error = str(e)
+
+    # 3. Retain explicit engineer preference into engineer-{engineer_id}
+    # Do not infer a personal preference merely because an engineer selected a particular fix.
+    if payload.engineer_preference and payload.engineer_id:
+        try:
+            pref_ok = await hindsight_service.remember_engineer_preference(
+                engineer_id=payload.engineer_id,
+                preference=payload.engineer_preference,
+                category="workflow",
+            )
+            preference_retained = bool(pref_ok)
+        except Exception as e:
+            logger.warning(f"Failed to retain engineer preference: {e}")
+            if not hindsight_error:
+                hindsight_error = str(e)
 
     return FeedbackCreateResponse(
         incident_id=incident_id,
         status="recorded",
         negative_memory_retained=negative_retained,
+        preference_retained=preference_retained,
+        persisted_to_db=persisted_to_db,
+        database_error=db_error,
+        hindsight_error=hindsight_error,
     )
 
 
@@ -246,26 +232,64 @@ async def submit_feedback(
 async def resolve_incident(
     incident_id: str,
     payload: ResolveIncidentRequest,
+    session: AsyncSession = Depends(get_db_session),
 ) -> ResolveIncidentResponse:
     """
-    Closes the incident, writes postmortem facts, and triggers episodic retention
-    into Hindsight Cloud memory.
+    Closes the incident, writes postmortem facts to PostgreSQL, and triggers episodic retention
+    into Hindsight Cloud organizational memory (kartly-sre).
     """
-    incident = ACTIVE_INCIDENTS.get(incident_id)
-    if not incident:
-        ACTIVE_INCIDENTS[incident_id] = {"id": incident_id}
-        incident = ACTIVE_INCIDENTS[incident_id]
+    repo = SQLAlchemyRepository(session)
+    persisted_to_db = False
+    episodic_retained = False
+    db_error = None
+    hindsight_error = None
 
+    # 1. Persist resolution in PostgreSQL
+    try:
+        persisted_to_db = await repo.resolve_incident(
+            incident_code=incident_id,
+            root_cause=payload.root_cause,
+            fix=payload.fix,
+            duration_min=payload.duration_min,
+        )
+    except Exception as e:
+        logger.error(f"Database error resolving incident: {e}")
+        db_error = str(e)
+        persisted_to_db = False
+
+    # Mirror in ephemeral registry for offline mock fallback
+    incident = ACTIVE_INCIDENTS.setdefault(incident_id, {"id": incident_id})
     incident["status"] = "resolved"
     incident["root_cause"] = payload.root_cause
     incident["fix"] = payload.fix
     incident["duration_min"] = payload.duration_min
     incident["resolved_at"] = datetime.now(timezone.utc)
 
+    # 2. Retain postmortem into Hindsight organizational bank (kartly-sre)
+    try:
+        inc = await repo.get_incident(incident_id) or ACTIVE_INCIDENTS.get(incident_id, {})
+        svc = inc.get("service_name", "checkout-api")
+        sym = inc.get("symptom", "Service degradation")
+        rem_ok = await hindsight_service.remember_incident(
+            incident_id=incident_id,
+            service_name=svc,
+            symptom=sym,
+            root_cause=payload.root_cause,
+            fix=payload.fix,
+            duration_min=payload.duration_min,
+        )
+        episodic_retained = bool(rem_ok)
+    except Exception as e:
+        logger.error(f"Hindsight postmortem retention failed: {e}")
+        hindsight_error = str(e)
+
     return ResolveIncidentResponse(
         incident_id=incident_id,
         status="resolved",
-        episodic_memory_retained=True,
+        episodic_memory_retained=episodic_retained,
+        persisted_to_db=persisted_to_db,
+        database_error=db_error,
+        hindsight_error=hindsight_error,
     )
 
 
@@ -275,31 +299,21 @@ async def resolve_incident(
     status_code=status.HTTP_200_OK,
     summary="Retrieve Memories Used for Incident",
 )
-async def get_incident_memories(incident_id: str) -> MemoriesResponse:
+async def get_incident_memories(
+    incident_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> MemoriesResponse:
     """
     Retrieves positive episodic and negative memory entries cited during triage
     for display in the frontend Memory Panel.
     """
-    incident = ACTIVE_INCIDENTS.get(incident_id, {})
-    memories = incident.get("memories", [
-        {
-            "memory_type": "episodic_resolution",
-            "incident_id": "INC-1987",
-            "similarity": 0.94,
-            "relative_time": "6 weeks ago",
-            "symptom": "Fatal connection slots exhausted during campaign",
-            "root_cause": "Connection leak under traffic spike",
-            "successful_fix": "Increased max_connections to 400 and deployed PgBouncer pooler",
-        },
-        {
-            "memory_type": "failed_fix",
-            "failed_fix_id": "FF-302",
-            "incident_id": "INC-1987",
-            "service_name": "payments-db",
-            "attempted_action": "systemctl restart postgresql",
-            "warning_directive": "Do NOT restart payments-db under active connection exhaustion.",
-        },
-    ])
+    repo = SQLAlchemyRepository(session)
+    inc = await repo.get_incident(incident_id) or ACTIVE_INCIDENTS.get(incident_id, {})
+    svc = inc.get("service_name", "checkout-api")
+    sym = inc.get("symptom", "Database connection pool exhaustion")
+
+    unified = await hindsight_service.retrieve_unified_memory(service_name=svc, symptom=sym)
+    memories = unified.get("memory_hits", [])
 
     return MemoriesResponse(
         incident_id=incident_id,

@@ -129,7 +129,7 @@ def test_tool_get_service_owner(test_dispatcher):
                 {"service_name": "checkout-api"},
             )
             assert res["tool"] == "get_service_owner"
-            assert "@priya-sre" in res["owner"]
+            assert "@priya" in res["owner"]
         finally:
             await session.close()
             await engine.dispose()

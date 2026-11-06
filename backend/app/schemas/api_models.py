@@ -83,6 +83,16 @@ class FeedbackCreateRequest(BaseModel):
         description="Contextual engineering notes explaining why the action succeeded or failed.",
         examples=["Restart cleared cache and caused 100% disk thrashing cascading to checkout-api."],
     )
+    engineer_id: Optional[str] = Field(
+        default=None,
+        description="Optional engineer identifier providing feedback (for preference attribution).",
+        examples=["engineer-1", "priya"],
+    )
+    engineer_preference: Optional[str] = Field(
+        default=None,
+        description="Explicit engineer workflow/explanation preference to retain in engineer bank.",
+        examples=["Prefers concise command line fixes without verbose explanations."],
+    )
 
 
 class FeedbackCreateResponse(BaseModel):
@@ -92,6 +102,22 @@ class FeedbackCreateResponse(BaseModel):
     negative_memory_retained: bool = Field(
         default=False,
         description="Indicates whether this feedback was retained into Hindsight negative memory.",
+    )
+    preference_retained: bool = Field(
+        default=False,
+        description="Indicates whether explicit engineer preference was retained in engineer bank.",
+    )
+    persisted_to_db: bool = Field(
+        default=True,
+        description="Indicates whether this feedback attempt was persisted in PostgreSQL.",
+    )
+    database_error: Optional[str] = Field(
+        default=None,
+        description="Details of any database persistence error if one occurred.",
+    )
+    hindsight_error: Optional[str] = Field(
+        default=None,
+        description="Details of any Hindsight memory retention error if one occurred.",
     )
 
 
@@ -121,6 +147,11 @@ class ResolveIncidentRequest(BaseModel):
         description="Total duration of the outage in minutes (MTTR).",
         examples=[14],
     )
+    postmortem_summary: Optional[str] = Field(
+        default=None,
+        description="Optional summary synthesis of the postmortem.",
+        examples=["Connection exhaustion on checkout-api mitigated by rollback and connection limits."],
+    )
 
 
 class ResolveIncidentResponse(BaseModel):
@@ -130,6 +161,18 @@ class ResolveIncidentResponse(BaseModel):
     episodic_memory_retained: bool = Field(
         default=False,
         description="Indicates whether this postmortem was retained into Hindsight episodic memory.",
+    )
+    persisted_to_db: bool = Field(
+        default=True,
+        description="Indicates whether the incident resolution was persisted in PostgreSQL.",
+    )
+    database_error: Optional[str] = Field(
+        default=None,
+        description="Details of any database persistence error if one occurred.",
+    )
+    hindsight_error: Optional[str] = Field(
+        default=None,
+        description="Details of any Hindsight memory retention error if one occurred.",
     )
 
 

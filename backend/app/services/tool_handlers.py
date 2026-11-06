@@ -41,90 +41,174 @@ class AgentToolDispatcher:
         self.hindsight = hindsight or hindsight_service
         self.band = band or band_adapter
 
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        memory_enabled: bool = True,
+    ) -> Dict[str, Any]:
         """
         Validates arguments against the AI/ML Pydantic schema and invokes the backing service.
         Returns a structured result dict or an error dict if validation fails.
         """
         try:
             if tool_name == "recall_similar_incidents":
+                if not memory_enabled:
+                    return {
+                        "tool": tool_name,
+                        "status": "disabled",
+                        "count": 0,
+                        "similar_incidents": [],
+                        "error": "Hindsight memory is disabled by query parameter (?memory=off)",
+                    }
                 parsed = RecallSimilarIncidentsInput.model_validate(arguments)
-                memories = await self.hindsight.recall_similar(
-                    service_name=parsed.service_name,
-                    symptom=parsed.symptom,
-                    limit=parsed.limit,
-                )
-                return {
-                    "tool": tool_name,
-                    "service_name": parsed.service_name,
-                    "count": len(memories),
-                    "similar_incidents": memories,
-                }
+                try:
+                    memories = await self.hindsight.recall_similar(
+                        service_name=parsed.service_name,
+                        symptom=parsed.symptom,
+                        limit=parsed.limit,
+                    )
+                    return {
+                        "tool": tool_name,
+                        "service_name": parsed.service_name,
+                        "count": len(memories),
+                        "similar_incidents": memories,
+                        "status": "success",
+                    }
+                except Exception as e:
+                    logger.error(f"Hindsight recall_similar error: {e}")
+                    return {
+                        "tool": tool_name,
+                        "status": "unavailable",
+                        "count": 0,
+                        "similar_incidents": [],
+                        "error": f"Hindsight memory service unavailable: {str(e)}",
+                    }
 
             elif tool_name == "recall_failed_fixes":
+                if not memory_enabled:
+                    return {
+                        "tool": tool_name,
+                        "status": "disabled",
+                        "count": 0,
+                        "failed_fixes": [],
+                        "error": "Hindsight memory is disabled by query parameter (?memory=off)",
+                    }
                 parsed = RecallFailedFixesInput.model_validate(arguments)
-                failed_fixes = await self.hindsight.recall_failed_fixes(
-                    service_name=parsed.service_name,
-                    incident_signature=parsed.incident_signature,
-                )
-                return {
-                    "tool": tool_name,
-                    "service_name": parsed.service_name,
-                    "count": len(failed_fixes),
-                    "failed_fixes": failed_fixes,
-                }
+                try:
+                    failed_fixes = await self.hindsight.recall_failed_fixes(
+                        service_name=parsed.service_name,
+                        incident_signature=parsed.incident_signature,
+                    )
+                    return {
+                        "tool": tool_name,
+                        "service_name": parsed.service_name,
+                        "count": len(failed_fixes),
+                        "failed_fixes": failed_fixes,
+                        "status": "success",
+                    }
+                except Exception as e:
+                    logger.error(f"Hindsight recall_failed_fixes error: {e}")
+                    return {
+                        "tool": tool_name,
+                        "status": "unavailable",
+                        "count": 0,
+                        "failed_fixes": [],
+                        "error": f"Hindsight memory service unavailable: {str(e)}",
+                    }
 
             elif tool_name == "get_recent_deploys":
                 parsed = GetRecentDeploysInput.model_validate(arguments)
-                deploys = await self.db_repo.get_recent_deploys(
-                    service_name=parsed.service_name,
-                    lookback_hours=parsed.lookback_hours,
-                )
-                return {
-                    "tool": tool_name,
-                    "service_name": parsed.service_name,
-                    "lookback_hours": parsed.lookback_hours,
-                    "count": len(deploys),
-                    "deploys": deploys,
-                }
+                try:
+                    deploys = await self.db_repo.get_recent_deploys(
+                        service_name=parsed.service_name,
+                        lookback_hours=parsed.lookback_hours,
+                    )
+                    return {
+                        "tool": tool_name,
+                        "service_name": parsed.service_name,
+                        "lookback_hours": parsed.lookback_hours,
+                        "count": len(deploys),
+                        "deploys": deploys,
+                        "status": "success",
+                    }
+                except Exception as e:
+                    logger.error(f"Database error in get_recent_deploys: {e}")
+                    return {
+                        "tool": tool_name,
+                        "status": "database_error",
+                        "error": f"Database query failed: {type(e).__name__}: {str(e)}",
+                    }
 
             elif tool_name == "get_logs":
                 parsed = GetLogsInput.model_validate(arguments)
-                logs = await self.db_repo.get_logs(
-                    service_name=parsed.service_name,
-                    incident_id=parsed.incident_id,
-                    limit=parsed.limit,
-                )
-                return {
-                    "tool": tool_name,
-                    "service_name": parsed.service_name,
-                    "incident_id": parsed.incident_id,
-                    "count": len(logs),
-                    "logs": logs,
-                }
+                try:
+                    logs = await self.db_repo.get_logs(
+                        service_name=parsed.service_name,
+                        incident_id=parsed.incident_id,
+                        limit=parsed.limit,
+                    )
+                    return {
+                        "tool": tool_name,
+                        "service_name": parsed.service_name,
+                        "incident_id": parsed.incident_id,
+                        "count": len(logs),
+                        "logs": logs,
+                        "status": "success",
+                    }
+                except Exception as e:
+                    logger.error(f"Database error in get_logs: {e}")
+                    return {
+                        "tool": tool_name,
+                        "status": "database_error",
+                        "error": f"Database query failed: {type(e).__name__}: {str(e)}",
+                    }
 
             elif tool_name == "get_service_owner":
                 parsed = GetServiceOwnerInput.model_validate(arguments)
-                owner = await self.db_repo.get_service_owner(service_name=parsed.service_name)
-                return {
-                    "tool": tool_name,
-                    "service_name": parsed.service_name,
-                    "owner": owner or f"{parsed.service_name}-squad",
-                }
+                try:
+                    owner = await self.db_repo.get_service_owner(service_name=parsed.service_name)
+                    return {
+                        "tool": tool_name,
+                        "service_name": parsed.service_name,
+                        "owner": owner or f"{parsed.service_name}-squad",
+                        "status": "success",
+                    }
+                except Exception as e:
+                    logger.error(f"Database error in get_service_owner: {e}")
+                    return {
+                        "tool": tool_name,
+                        "status": "database_error",
+                        "error": f"Database query failed: {type(e).__name__}: {str(e)}",
+                    }
 
             elif tool_name == "post_to_band_room":
                 parsed = PostToBandRoomInput.model_validate(arguments)
-                posted = await self.band.post_incident_update(
-                    incident_id=parsed.incident_id,
-                    message=parsed.message,
-                    sender=parsed.sender,
-                )
-                return {
-                    "tool": tool_name,
-                    "incident_id": parsed.incident_id,
-                    "delivered": posted,
-                    "sender": parsed.sender,
-                }
+                try:
+                    posted = await self.band.post_incident_update(
+                        incident_id=parsed.incident_id,
+                        message=parsed.message,
+                        sender=parsed.sender,
+                    )
+                    from backend.app.services.band_adapter import MockBandAdapter
+                    is_mock = isinstance(self.band, MockBandAdapter)
+                    return {
+                        "tool": tool_name,
+                        "incident_id": parsed.incident_id,
+                        "delivered": posted,
+                        "status": "delivered_to_mock_adapter" if is_mock else "delivered",
+                        "adapter": type(self.band).__name__,
+                        "sender": parsed.sender,
+                    }
+                except Exception as e:
+                    logger.warning(f"Band communication failure (non-fatal): {e}")
+                    return {
+                        "tool": tool_name,
+                        "incident_id": parsed.incident_id,
+                        "delivered": False,
+                        "non_fatal": True,
+                        "error": f"Band communication failure: {str(e)}",
+                    }
 
             else:
                 return {
@@ -136,7 +220,8 @@ class AgentToolDispatcher:
             logger.warning(f"Tool argument validation failed for '{tool_name}': {e}")
             return {
                 "tool": tool_name,
-                "error": "Validation error in arguments",
+                "status": "validation_error",
+                "error": "Validation error in arguments. Please correct and retry.",
                 "details": e.errors(),
             }
         except Exception as e:

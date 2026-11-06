@@ -5,6 +5,7 @@ Asynchronous Database Session Management (SQLAlchemy 2.0 + asyncpg).
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Optional
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -36,14 +37,17 @@ def get_async_engine(database_url: Optional[str] = None) -> AsyncEngine:
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
         connect_args = {}
+        extra_kwargs = {}
         if url.startswith("sqlite"):
             connect_args["check_same_thread"] = False
+            extra_kwargs["poolclass"] = StaticPool
 
         _engine = create_async_engine(
             url,
             echo=settings.DEBUG_MODE,
             future=True,
             connect_args=connect_args,
+            **extra_kwargs,
         )
     return _engine
 
