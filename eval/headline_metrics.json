@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "phase": "Phase 3: Learning Proof",
+    "dataset": "40 Held-Out Development Incidents (INC-071 to INC-110)",
+    "purpose": "Authoritative deck metrics for Member 6 (Pitch Lead)"
+  },
+  "headline_1_accuracy": {
+    "label": "First-Attempt Root Cause Accuracy",
+    "stat": "80.0%",
+    "baseline": "32.5%",
+    "delta": "+47.5%",
+    "takeaway": "RecallOps achieves 80.0% Top-1 diagnostic accuracy with memory retention, outperforming the 32.5% stateless baseline by +47.5 percentage points."
+  },
+  "headline_2_mttr": {
+    "label": "Time to Correct Hypothesis (MTTR)",
+    "stat": "21.1 min",
+    "baseline": "45.0 min",
+    "reduction_percentage": "53.1%",
+    "takeaway": "Mean diagnostic time drops by 53.1% (from 45.0 min down to 21.1 min) as institutional memory resolves repeated symptom signatures rapidly."
+  },
+  "headline_3_anti_patterns": {
+    "label": "Repeated Failed Fixes Avoidance",
+    "stat": "100.0%",
+    "violations_memory_on": 0,
+    "violations_memory_off": 23,
+    "takeaway": "Negative memory completely eliminates repeated operational blunders: 0 repeated failed fixes with RecallOps vs. 23 repeated mistakes in stateless triage."
+  }
+}

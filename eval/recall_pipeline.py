@@ -184,11 +184,15 @@ class RecallPipeline:
             recency_weight: Weight assigned to incident recency (0.0 to 1.0).
             failure_penalty: Score reduction applied to actions with documented failures.
         """
-        self.memory_store = memory_store or []
-        self.standing_directives = standing_directives or DEFAULT_STANDING_DIRECTIVES
+        self.memory_store = memory_store if memory_store is not None else []
+        self.standing_directives = standing_directives if standing_directives is not None else DEFAULT_STANDING_DIRECTIVES
         self.sim_weight = sim_weight
         self.recency_weight = recency_weight
         self.failure_penalty = failure_penalty
+
+    def add_memory(self, item: Dict[str, Any]) -> None:
+        """Dynamically appends a new memory item to the active memory store."""
+        self.memory_store.append(item)
 
     # --------------------------------------------------------------------------
     # 1. TRIPARTITE RECALL EXECUTION
