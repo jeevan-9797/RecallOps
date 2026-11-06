@@ -171,6 +171,7 @@ def test_get_learning_curve_metrics_endpoint(client):
     assert data["accuracy_memory_on"] > data["accuracy_memory_off"]
     assert data["avg_mttr_memory_on_min"] < data["avg_mttr_memory_off_min"]
     assert data["negative_fix_avoidance_rate"] == 1.0
+    assert "demo" in data["benchmark_status"] or "benchmark" in data["benchmark_status"]
 
 
 def test_demo_reset_endpoint(client):

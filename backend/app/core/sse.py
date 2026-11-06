@@ -1,6 +1,7 @@
 """
 RecallOps Server-Sent Events (SSE) Protocol Helpers.
 Enforces deterministic newline-delimited SSE event framing for frontend streaming.
+Standardized event names: thought, tool_call, memory_hit, warning, suggestion, done, error.
 """
 
 import json
@@ -8,11 +9,12 @@ from typing import Any, Dict
 
 
 class SSEEventTypes:
-    """Standard event type constants for triage streaming."""
+    """Standard event type constants agreed upon with Frontend and AI/ML."""
     THOUGHT = "thought"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-    RECALLED_MEMORY = "recalled_memory"
+    MEMORY_HIT = "memory_hit"
+    RECALLED_MEMORY = "recalled_memory"  # Backward-compatible alias
     WARNING = "warning"
     SUGGESTION = "suggestion"
     DONE = "done"

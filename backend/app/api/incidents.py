@@ -96,19 +96,18 @@ async def generate_mock_triage_stream(
         )
         await asyncio.sleep(0.05)
 
-        # 6. Recalled Memory Event
-        yield format_sse(
-            SSEEventTypes.RECALLED_MEMORY,
-            {
-                "memory_type": "episodic_resolution",
-                "incident_id": "INC-1987",
-                "similarity": 0.94,
-                "relative_time": "6 weeks ago",
-                "symptom": "FATAL: remaining connection slots are reserved for non-replication superuser connections",
-                "root_cause": "Unindexed query in orders table during campaign traffic spike",
-                "successful_fix": "Rolled back pool changes and applied PgBouncer pooler cap.",
-            },
-        )
+        # 6. Recalled Memory Event (standardized memory_hit event)
+        memory_payload = {
+            "memory_type": "episodic_resolution",
+            "incident_id": "INC-1987",
+            "similarity": 0.94,
+            "relative_time": "6 weeks ago",
+            "symptom": "FATAL: remaining connection slots are reserved for non-replication superuser connections",
+            "root_cause": "Unindexed query in orders table during campaign traffic spike",
+            "successful_fix": "Rolled back pool changes and applied PgBouncer pooler cap.",
+        }
+        yield format_sse(SSEEventTypes.MEMORY_HIT, memory_payload)
+        yield format_sse(SSEEventTypes.RECALLED_MEMORY, memory_payload)
         await asyncio.sleep(0.05)
 
         # 7. Tool Call: recall_failed_fixes

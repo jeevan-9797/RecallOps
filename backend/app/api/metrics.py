@@ -17,8 +17,11 @@ router = APIRouter(prefix="/metrics", tags=["Metrics"])
 )
 async def get_learning_curve_metrics() -> LearningCurveMetricsResponse:
     """
-    Returns empirical evaluation results comparing agent triage performance
+    Returns synthetic evaluation benchmark metrics comparing agent triage performance
     with Hindsight memory disabled vs enabled across historical incidents.
+    Note: These numbers (42.5% vs 95.0%) represent synthetic demonstration values
+    designed for the initial presentation and will be updated when the live replay
+    evaluation harness completes.
     """
     return LearningCurveMetricsResponse(
         total_incidents_replayed=40,
@@ -27,5 +30,5 @@ async def get_learning_curve_metrics() -> LearningCurveMetricsResponse:
         avg_mttr_memory_off_min=44.2,
         avg_mttr_memory_on_min=6.8,
         negative_fix_avoidance_rate=1.00,
-        benchmark_status="replayed_benchmark_v1",
+        benchmark_status="synthetic_demo_baseline",
     )
