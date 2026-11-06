@@ -66,20 +66,55 @@ ENVIRONMENT=development
 
 ---
 
-## 4. Quick Start Commands
+## 4. Local PostgreSQL with Docker Compose
 
-### 1. Run Complete Reset & Seed Pipeline (< 60s benchmark)
+A local PostgreSQL 16 container configuration is provided via [`docker-compose.yml`](file:///e:/Database/docker-compose.yml).
+
+### Start PostgreSQL
+```bash
+# Start PostgreSQL container in background
+docker compose up -d
+
+# Verify container status and health check
+docker compose ps
+```
+The container is configured with an automated health check using `pg_isready`. Once healthy, it accepts connections at `localhost:5432`.
+
+### View Logs
+```bash
+docker compose logs -f postgres
+```
+
+### Stop PostgreSQL
+```bash
+# Stop the container while preserving persistent database data in 'postgres_data' volume
+docker compose down
+
+# Stop the container and completely wipe data volume (clean reset)
+docker compose down -v
+```
+
+---
+
+## 5. Quick Start Commands
+
+### 1. Apply Alembic Migrations to Live PostgreSQL
+```bash
+python -m alembic upgrade head
+```
+
+### 2. Run Complete Reset & Seed Pipeline (< 60s benchmark)
 ```bash
 python data/seed_all.py --dry-run
 ```
 *Executes full database reset, schema recreation, PostgreSQL seeding, replay dataset export, Hindsight memory seeding, and validation in under 1 second.*
 
-### 2. Seed PostgreSQL Only
+### 3. Seed PostgreSQL Only
 ```bash
 python data/seed_postgres.py
 ```
 
-### 3. Seed Hindsight Memory Bank
+### 4. Seed Hindsight Memory Bank
 ```bash
 # Live retention with Hindsight Cloud
 python data/seed_hindsight.py
@@ -88,19 +123,19 @@ python data/seed_hindsight.py
 python data/seed_hindsight.py --dry-run
 ```
 
-### 4. Run Data Validation Suite
+### 5. Run Data Validation Suite
 ```bash
 python data/validate_data.py
 ```
 
-### 5. Run Database Unit Tests
+### 6. Run Database Unit Tests
 ```bash
 python -m pytest database/tests -v
 ```
 
 ---
 
-## 5. Historical vs. Held-Out Replay Dataset
+## 6. Historical vs. Held-Out Replay Dataset
 
 To ensure rigorous evaluation without test data contamination:
 
@@ -118,7 +153,7 @@ To ensure rigorous evaluation without test data contamination:
 
 ---
 
-## 6. Integration Guide for Teammates
+## 7. Integration Guide for Teammates
 
 ### Member 1 — Backend (FastAPI)
 - **Database Dependency:** Use `from database.connection import get_db, get_session` in FastAPI routes.

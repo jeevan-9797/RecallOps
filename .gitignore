@@ -1,7 +1,16 @@
-# Environment variables
+# Environment variables and secrets
 .env
-.env.local
+.env.*
 *.env
+*.pem
+*.key
+*.cert
+*.crt
+credentials.json
+secrets/
+
+# Local PostgreSQL Docker data
+postgres_data/
 
 # SQLite local test files
 *.db
