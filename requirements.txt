@@ -1,0 +1,17 @@
+# RecallOps Backend Dependencies (Python 3.11 Compatible)
+# Phase 0 Foundation Pinned Dependencies
+
+fastapi>=0.115.0,<0.142.0
+uvicorn[standard]>=0.30.0,<0.53.0
+pydantic>=2.10.0,<3.0.0
+pydantic-settings>=2.6.0,<3.0.0
+python-dotenv>=1.0.1,<2.0.0
+sse-starlette>=2.1.0,<4.0.0
+groq>=0.11.0,<2.0.0
+hindsight-client>=1.2.0,<2.0.0
+supabase>=2.10.0,<3.0.0
+sqlalchemy>=2.0.30,<3.0.0
+asyncpg>=0.30.0,<1.0.0
+httpx>=0.28.0,<1.0.0
+pytest>=8.0.0,<10.0.0
+anyio>=4.0.0,<5.0.0
