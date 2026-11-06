@@ -1,0 +1,34 @@
+# Environment variables
+.env
+.env.local
+*.env
+
+# SQLite local test files
+*.db
+*.sqlite
+*.sqlite3
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & temp files
+*.log
+scratch/
+temp/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
