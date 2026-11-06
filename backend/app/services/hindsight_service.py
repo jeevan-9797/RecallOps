@@ -61,6 +61,7 @@ class HindsightService:
             "engineer-priya",
             "engineer-alice",
             "engineer-aarav",
+            "engineer-rahul",
             "engineer-1",
             "engineer-4",
         }
@@ -85,6 +86,16 @@ class HindsightService:
                     "text": "Prefers concise terminal commands and explicit connection pool metrics.",
                     "outcome": "preference",
                     "timestamp": "2026-10-15T09:30:00Z",
+                }
+            ],
+            "engineer-rahul": [
+                {
+                    "bank_type": "engineer",
+                    "bank_id": "engineer-rahul",
+                    "memory_type": "engineer_preference",
+                    "text": "Prefers step-by-step verification commands and explicit deployment diffs.",
+                    "outcome": "preference",
+                    "timestamp": "2026-10-18T11:00:00Z",
                 }
             ],
         }
