@@ -1,0 +1,272 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "phase": "Phase 0 Kickoff / Foundation",
+    "owner": "Member 4 (AI/ML & Model)",
+    "description": "Hand-off contract for Backend (Member 1) to import into FastAPI agent loop."
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "recall_similar_incidents",
+        "description": "Query past resolved incidents matching service name and symptom patterns from Hindsight vector/episodic memory.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service_name": {
+              "description": "Name of the affected service or infrastructure component (e.g., 'checkout-api', 'payments-db').",
+              "minLength": 1,
+              "title": "Service Name",
+              "type": "string"
+            },
+            "symptom": {
+              "description": "Primary symptom, error pattern, or observed anomaly string (e.g., 'HTTP 500 spike post deploy').",
+              "minLength": 1,
+              "title": "Symptom",
+              "type": "string"
+            },
+            "limit": {
+              "default": 3,
+              "description": "Maximum number of historical similar incidents to recall from Hindsight episodic memory.",
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "service_name",
+            "symptom"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "recall_failed_fixes",
+        "description": "Retrieve negative-memory records of known failed remediations, anti-patterns, or harmful actions attempted for this incident signature to prevent repeating past mistakes.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service_name": {
+              "description": "Name of the affected service or infrastructure component.",
+              "minLength": 1,
+              "title": "Service Name",
+              "type": "string"
+            },
+            "incident_signature": {
+              "description": "Error signature, stack trace fingerprint, or incident pattern used to query negative memory for failed remediation attempts.",
+              "minLength": 1,
+              "title": "Incident Signature",
+              "type": "string"
+            }
+          },
+          "required": [
+            "service_name",
+            "incident_signature"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_recent_deploys",
+        "description": "Fetch deployment history, commit hashes, authors, and rollout status for a service within a given lookback window.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service_name": {
+              "description": "Target service name to query deployment history.",
+              "minLength": 1,
+              "title": "Service Name",
+              "type": "string"
+            },
+            "lookback_hours": {
+              "default": 24,
+              "description": "Hours to look back for recent deployments, canary rollouts, or config updates.",
+              "maximum": 720,
+              "minimum": 1,
+              "title": "Lookback Hours",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "service_name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_logs",
+        "description": "Retrieve recent log events and error traces for a specific service and incident.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service_name": {
+              "description": "Service identifier whose logs need to be fetched.",
+              "minLength": 1,
+              "title": "Service Name",
+              "type": "string"
+            },
+            "incident_id": {
+              "description": "Identifier of the active incident for correlated log querying (e.g., 'INC-2045').",
+              "minLength": 1,
+              "title": "Incident Id",
+              "type": "string"
+            },
+            "limit": {
+              "default": 50,
+              "description": "Maximum number of log entries to retrieve.",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "service_name",
+            "incident_id"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_service_owner",
+        "description": "Find the primary on-call engineer, team lead, and escalation contact details for a given service.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service_name": {
+              "description": "Name of the service to look up on-call engineers, squad lead, and escalation pathways.",
+              "minLength": 1,
+              "title": "Service Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "service_name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "post_to_band_room",
+        "description": "Broadcast real-time triage updates, incident status, hypotheses, or escalation alerts to the virtual incident command/band room.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "incident_id": {
+              "description": "Target incident war room / band room identifier.",
+              "minLength": 1,
+              "title": "Incident Id",
+              "type": "string"
+            },
+            "message": {
+              "description": "Markdown-formatted message or structured update to post to the incident channel.",
+              "minLength": 1,
+              "title": "Message",
+              "type": "string"
+            },
+            "sender": {
+              "default": "Triage Agent",
+              "description": "Display name or system identity of the entity posting to the room.",
+              "minLength": 1,
+              "title": "Sender",
+              "type": "string"
+            }
+          },
+          "required": [
+            "incident_id",
+            "message"
+          ]
+        }
+      }
+    }
+  ],
+  "agent_response_schema": {
+    "additionalProperties": false,
+    "description": "Structured final response schema produced by the RecallOps SRE agent\nupon completing incident triage, investigation, and root-cause synthesis.",
+    "example": {
+      "cited_incident_ids": [
+        "INC-1987",
+        "INC-1842"
+      ],
+      "confidence": 0.92,
+      "failed_fixes_warning": [
+        "Do NOT restart payments-db: failed 2x in Sept and caused cascade outage",
+        "Do NOT increase thread pool beyond 200 without buffer pool resizing"
+      ],
+      "hypothesis": "Database connection pool exhaustion caused by unindexed query introduced in release v2.4.1.",
+      "incident_id": "INC-2045",
+      "likely_owner": "payments-platform-team (@alice-sre)",
+      "recommended_action": "Rollback payments-service to release v2.4.0 and apply hotfix index on orders.customer_id."
+    },
+    "properties": {
+      "incident_id": {
+        "description": "Unique identifier of the incident being triaged (e.g., 'INC-2045').",
+        "minLength": 1,
+        "title": "Incident Id",
+        "type": "string"
+      },
+      "hypothesis": {
+        "description": "Root cause hypothesis derived from symptoms, logs, deploys, and recalled historical incidents.",
+        "minLength": 1,
+        "title": "Hypothesis",
+        "type": "string"
+      },
+      "confidence": {
+        "description": "Confidence score between 0.0 and 1.0 representing certainty of the diagnosis and recommendation.",
+        "maximum": 1.0,
+        "minimum": 0.0,
+        "title": "Confidence",
+        "type": "number"
+      },
+      "cited_incident_ids": {
+        "description": "List of historical incident IDs referenced as precedent or evidence (e.g., ['INC-1987']).",
+        "items": {
+          "type": "string"
+        },
+        "title": "Cited Incident Ids",
+        "type": "array"
+      },
+      "failed_fixes_warning": {
+        "description": "Critical warnings of remediation attempts that failed in past incidents and MUST NOT be repeated (negative memory).",
+        "items": {
+          "type": "string"
+        },
+        "title": "Failed Fixes Warning",
+        "type": "array"
+      },
+      "recommended_action": {
+        "description": "Actionable, prescriptive recommendation for resolving or mitigating the incident.",
+        "minLength": 1,
+        "title": "Recommended Action",
+        "type": "string"
+      },
+      "likely_owner": {
+        "description": "Team, squad, or on-call engineer identified as the appropriate owner/resolver.",
+        "minLength": 1,
+        "title": "Likely Owner",
+        "type": "string"
+      }
+    },
+    "required": [
+      "incident_id",
+      "hypothesis",
+      "confidence",
+      "recommended_action",
+      "likely_owner"
+    ],
+    "title": "AgentTriageResponse",
+    "type": "object"
+  }
+}
