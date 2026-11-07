@@ -172,6 +172,7 @@ class RealBandAdapter(BandAdapterInterface):
 
         # Pre-injected or lazily constructed AsyncRestClient
         self._client = rest_client
+        self._participants_cache: Dict[str, List[Any]] = {}
 
     def _get_client(self):
         """Initializes AsyncRestClient from Band SDK if not already injected."""
@@ -257,6 +258,74 @@ class RealBandAdapter(BandAdapterInterface):
 
         return "\n".join(lines)
 
+    async def _resolve_room_mentions(
+        self,
+        room_id: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, list[Any]]:
+        """
+        Ensures Band platform requirement of minItems: 1 for mentions is satisfied.
+        Resolves mentions from metadata or queries room participants, caching results.
+        """
+        from band.client.rest import ChatMessageRequestMentionsItem
+        meta = metadata or {}
+        explicit_mentions = meta.get("mentions")
+        if explicit_mentions:
+            items = []
+            for m in explicit_mentions:
+                if isinstance(m, dict):
+                    items.append(ChatMessageRequestMentionsItem(**m))
+                elif isinstance(m, str):
+                    handle = m.lstrip("@")
+                    items.append(ChatMessageRequestMentionsItem(handle=handle))
+            if items:
+                return content, items
+
+        # Query room participants if not cached
+        if room_id not in self._participants_cache:
+            client = self._get_client()
+            if client and hasattr(client, "agent_api_participants") and hasattr(client.agent_api_participants, "list_agent_chat_participants"):
+                try:
+                    resp = await client.agent_api_participants.list_agent_chat_participants(chat_id=room_id)
+                    participants = getattr(resp, "data", resp) or []
+                    target_participants = [
+                        p for p in participants
+                        if getattr(p, "id", None) != self.agent_id and getattr(p, "type", None) != "Agent"
+                    ]
+                    if not target_participants:
+                        target_participants = [
+                            p for p in participants if getattr(p, "id", None) != self.agent_id
+                        ]
+                    self._participants_cache[room_id] = target_participants
+                except Exception as e:
+                    logger.debug(f"Could not fetch participants for room {room_id}: {e}")
+                    self._participants_cache[room_id] = []
+
+        cached = self._participants_cache.get(room_id, [])
+        if cached:
+            p = cached[0]
+            handle = getattr(p, "handle", "here")
+            mention_item = ChatMessageRequestMentionsItem(
+                id=getattr(p, "id", None),
+                handle=handle,
+                name=getattr(p, "name", None),
+            )
+            if f"@{handle}" not in content:
+                content = f"@{handle} {content}"
+            return content, [mention_item]
+
+        # Generic fallback mention item if room participants couldn't be loaded
+        fallback_handle = meta.get("likely_owner") or "channel"
+        if isinstance(fallback_handle, str) and "@" in fallback_handle:
+            m = re.search(r"@([a-zA-Z0-9_-]+)", fallback_handle)
+            if m:
+                fallback_handle = m.group(1)
+        fallback_item = ChatMessageRequestMentionsItem(handle=str(fallback_handle))
+        if f"@{fallback_handle}" not in content:
+            content = f"@{fallback_handle} {content}"
+        return content, [fallback_item]
+
     async def post_incident_update(
         self,
         incident_id: str,
@@ -302,9 +371,14 @@ class RealBandAdapter(BandAdapterInterface):
 
         try:
             from band.client.rest import ChatMessageRequest, DEFAULT_REQUEST_OPTIONS
-            request_payload = ChatMessageRequest(
+            content_with_mention, mention_items = await self._resolve_room_mentions(
+                room_id=room_id,
                 content=formatted_content,
-                mentions=[],  # Required field on ChatMessageRequest; empty list valid for general war room post
+                metadata=metadata,
+            )
+            request_payload = ChatMessageRequest(
+                content=content_with_mention,
+                mentions=mention_items,
             )
         except Exception as err:
             logger.error(f"Failed to construct Band ChatMessageRequest: {err}")

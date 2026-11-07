@@ -26,8 +26,8 @@ def is_live_postgres_available() -> bool:
 
 
 def is_live_band_available() -> bool:
-    key = os.getenv("BAND_API_KEY")
-    room = os.getenv("BAND_DEFAULT_ROOM_ID")
+    key = settings.BAND_API_KEY or os.getenv("BAND_API_KEY")
+    room = settings.BAND_DEFAULT_ROOM_ID or os.getenv("BAND_DEFAULT_ROOM_ID")
     return bool(key and key.startswith("band_a_") and room)
 
 
@@ -44,9 +44,16 @@ def test_live_band_message_delivery():
 
     async def _test():
         delivered = await adapter.post_incident_update(
-            incident_id="INC-LIVE-TEST",
-            message="[Automated Integration Test] Live Band room connectivity verified by RecallOps backend.",
-            sender="RecallOps CI",
+            incident_id="INC-P3-LIVE",
+            message="RecallOps P3 Live Integration Test – Band REST delivery successful.",
+            sender="RecallOps Lead",
+            metadata={
+                "severity": "CRITICAL",
+                "confidence": 0.98,
+                "hypothesis": "RecallOps P3 Live Integration Test – Band REST delivery successful.",
+                "recommended_action": "Verify message receipt in the Band war room chat channel.",
+                "likely_owner": "recallops-backend-lead",
+            },
         )
         assert delivered is True
 
