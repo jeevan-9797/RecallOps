@@ -56,4 +56,5 @@ scratch/
 eval/replay_results.json
 .env.local
 .env.*.local
+bin/
 
