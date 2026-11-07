@@ -57,4 +57,5 @@ eval/replay_results.json
 .env.local
 .env.*.local
 bin/
+.demo_reset_token
 
