@@ -48,6 +48,12 @@ class Settings(BaseSettings):
 
     # Band Multi-Agent Room Integration
     BAND_ROOM_WEBHOOK_URL: Optional[str] = Field(default=None, description="Band room incoming webhook URL")
+    BAND_AGENT_ID: Optional[str] = Field(default=None, description="Band remote agent UUID")
+    BAND_API_KEY: Optional[str] = Field(default=None, description="Band agent API key")
+    BAND_DEFAULT_ROOM_ID: Optional[str] = Field(default=None, description="Default Band chat room ID for incident alerts")
+    BAND_API_BASE_URL: str = Field(default="https://app.band.ai", description="Band platform REST API base URL")
+    BAND_DELIVERY_TIMEOUT: float = Field(default=5.0, description="Total timeout in seconds for Band delivery")
+    BAND_MAX_RETRIES: int = Field(default=2, description="Maximum retry attempts for transient Band delivery failures")
 
     # CORS Origins for Frontend Integration
     CORS_ORIGINS: List[str] = Field(
@@ -79,6 +85,10 @@ class Settings(BaseSettings):
     def is_supabase_ready(self) -> bool:
         """Returns True if Supabase URL and Key are present."""
         return bool(self.SUPABASE_URL and self.SUPABASE_KEY and not self.SUPABASE_URL.startswith("https://your-"))
+
+    def is_band_ready(self) -> bool:
+        """Returns True if Band API key is present and non-empty."""
+        return bool(self.BAND_API_KEY and self.BAND_API_KEY.strip() and not self.BAND_API_KEY.startswith("your_"))
 
 
 # Cached global settings singleton

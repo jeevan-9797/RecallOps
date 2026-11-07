@@ -22,7 +22,12 @@ from backend.app.schemas.agent_tools import (
     RecallFailedFixesInput,
     RecallSimilarIncidentsInput,
 )
-from backend.app.services.band_adapter import BandAdapterInterface, band_adapter
+from backend.app.services.band_adapter import (
+    BandAdapterInterface,
+    MockBandAdapter,
+    band_adapter,
+    get_band_adapter,
+)
 from backend.app.services.hindsight_service import HindsightService, hindsight_service
 
 logger = logging.getLogger("recallops.tools")
@@ -39,7 +44,7 @@ class AgentToolDispatcher:
     ):
         self.db_repo = db_repo
         self.hindsight = hindsight or hindsight_service
-        self.band = band or band_adapter
+        self.band = band if band is not None else get_band_adapter()
 
     async def execute_tool(
         self,
@@ -190,13 +195,13 @@ class AgentToolDispatcher:
                         message=parsed.message,
                         sender=parsed.sender,
                     )
-                    from backend.app.services.band_adapter import MockBandAdapter
                     is_mock = isinstance(self.band, MockBandAdapter)
+                    status_str = "delivered_to_mock_adapter" if is_mock else ("delivered" if posted else "delivery_failed")
                     return {
                         "tool": tool_name,
                         "incident_id": parsed.incident_id,
                         "delivered": posted,
-                        "status": "delivered_to_mock_adapter" if is_mock else "delivered",
+                        "status": status_str,
                         "adapter": type(self.band).__name__,
                         "sender": parsed.sender,
                     }

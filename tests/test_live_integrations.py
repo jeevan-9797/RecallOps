@@ -25,6 +25,34 @@ def is_live_postgres_available() -> bool:
     return bool(url and "localhost:5432" in url)
 
 
+def is_live_band_available() -> bool:
+    key = os.getenv("BAND_API_KEY")
+    room = os.getenv("BAND_DEFAULT_ROOM_ID")
+    return bool(key and key.startswith("band_a_") and room)
+
+
+@pytest.mark.skipif(not is_live_band_available(), reason="BAND_API_KEY and BAND_DEFAULT_ROOM_ID not configured for live Band test")
+def test_live_band_message_delivery():
+    import asyncio
+    from backend.app.services.band_adapter import RealBandAdapter
+    adapter = RealBandAdapter(
+        agent_id=settings.BAND_AGENT_ID,
+        api_key=settings.BAND_API_KEY,
+        default_room_id=settings.BAND_DEFAULT_ROOM_ID,
+        base_url=settings.BAND_API_BASE_URL,
+    )
+
+    async def _test():
+        delivered = await adapter.post_incident_update(
+            incident_id="INC-LIVE-TEST",
+            message="[Automated Integration Test] Live Band room connectivity verified by RecallOps backend.",
+            sender="RecallOps CI",
+        )
+        assert delivered is True
+
+    asyncio.run(_test())
+
+
 @pytest.mark.skipif(not is_live_groq_available(), reason="GROQ_API_KEY not configured for live inference test")
 def test_live_groq_completion():
     from groq import Groq
