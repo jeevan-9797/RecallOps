@@ -4,10 +4,15 @@ Handles POST /api/alerts to register an active incident and trigger investigatio
 """
 
 from datetime import datetime, timezone
+import logging
 import uuid
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from backend.app.db.session import get_db_session
+from backend.app.db.repository import SQLAlchemyRepository
 from backend.app.schemas.api_models import AlertCreateRequest, AlertCreateResponse
 
+logger = logging.getLogger("recallops.api.alerts")
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
 
 # Ephemeral in-memory incident registry for P0 development and mock testing
@@ -20,21 +25,37 @@ ACTIVE_INCIDENTS: dict[str, dict] = {}
     status_code=status.HTTP_201_CREATED,
     summary="Ingest Operational Alert",
 )
-async def create_alert(payload: AlertCreateRequest) -> AlertCreateResponse:
+async def create_alert(
+    payload: AlertCreateRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> AlertCreateResponse:
     """
     Ingests an incoming alert from monitoring systems (e.g. Kartly latency spike),
-    generates a tracked incident ID, and stores the initial incident state.
+    generates a tracked incident ID, persists to PostgreSQL, and stores active incident state.
     """
-    incident_num = 2000 + len(ACTIVE_INCIDENTS) + 1
-    incident_id = f"INC-{incident_num}"
     created_at = payload.timestamp or datetime.now(timezone.utc)
+    incident_id = None
+
+    try:
+        repo = SQLAlchemyRepository(session)
+        incident_id = await repo.create_incident(
+            service_name=payload.service_name,
+            symptom=payload.symptom,
+            severity=payload.severity,
+        )
+    except Exception as e:
+        logger.warning(f"Could not persist incident to database, falling back to ephemeral: {e}")
+
+    if not incident_id:
+        incident_num = 2000 + len(ACTIVE_INCIDENTS) + 1
+        incident_id = f"INC-{incident_num}"
 
     incident_record = {
         "id": incident_id,
         "service_name": payload.service_name,
         "symptom": payload.symptom,
         "severity": payload.severity,
-        "status": "created",
+        "status": "OPEN",
         "created_at": created_at,
         "feedback": [],
         "memories": [

@@ -211,15 +211,40 @@ class ObservationsResponse(BaseModel):
 # 6. LEARNING CURVE BENCHMARK METRICS (/api/metrics/learning-curve)
 # ==============================================================================
 
+class LearningCurvePoint(BaseModel):
+    """Single chronological incident point on the learning curve chart."""
+    n: int = Field(..., description="Chronological incident number (1-based, 1 to 40).")
+    on: float = Field(..., description="Rolling Top-1 diagnostic accuracy with memory ON (0.0 - 1.0).")
+    off: float = Field(..., description="Rolling Top-1 diagnostic accuracy with memory OFF (0.0 - 1.0).")
+    incident_id: Optional[str] = Field(default=None, description="Incident code identifier (e.g. 'INC-071').")
+    service_name: Optional[str] = Field(default=None, description="Affected microservice name.")
+
+
+class LearningCurveStats(BaseModel):
+    """Aggregate headline evaluation metrics comparing Memory ON vs Memory OFF."""
+    top1_on: float = Field(..., description="Final Top-1 accuracy with memory ON (0.0 - 1.0).")
+    top1_off: float = Field(..., description="Final Top-1 accuracy with memory OFF (0.0 - 1.0).")
+    repeated_failed_fixes_on: int = Field(default=0, description="Cumulative repeated failed fixes attempted with memory ON (target: 0).")
+    repeated_failed_fixes_off: Optional[int] = Field(default=None, description="Cumulative repeated failed fixes with memory OFF.")
+    avg_mttr_on_min: Optional[float] = Field(default=None, description="Mean time to correct hypothesis in minutes with memory ON.")
+    avg_mttr_off_min: Optional[float] = Field(default=None, description="Mean time to correct hypothesis in minutes with memory OFF.")
+
+
 class LearningCurveMetricsResponse(BaseModel):
     """Deterministic learning-curve metrics comparing memory OFF vs ON over replayed incidents."""
-    total_incidents_replayed: int = Field(..., description="Number of incidents in the evaluation benchmark.")
+    # Frontend LearningCurve contract
+    points: List[LearningCurvePoint] = Field(default_factory=list, description="Chronological rolling accuracy points.")
+    stats: LearningCurveStats = Field(..., description="Aggregate headline comparison statistics.")
+    sample: bool = Field(default=False, description="True while numbers are placeholders; False when real replay results.")
+
+    # Backward-compatible backend top-level fields
+    total_incidents_replayed: int = Field(default=40, description="Number of incidents in the evaluation benchmark.")
     accuracy_memory_off: float = Field(..., description="Diagnostic accuracy with Hindsight memory disabled (0.0 - 1.0).")
     accuracy_memory_on: float = Field(..., description="Diagnostic accuracy with Hindsight memory enabled (0.0 - 1.0).")
     avg_mttr_memory_off_min: float = Field(..., description="Average MTTR in minutes with memory disabled.")
     avg_mttr_memory_on_min: float = Field(..., description="Average MTTR in minutes with memory enabled.")
-    negative_fix_avoidance_rate: float = Field(..., description="Percentage of known failed remediations rejected (target 100%).")
-    benchmark_status: str = Field(default="ready", description="Status of the benchmark run.")
+    negative_fix_avoidance_rate: float = Field(default=1.00, description="Percentage of known failed remediations rejected (target 100%).")
+    benchmark_status: str = Field(default="phase3_replay_benchmark", description="Status of the benchmark run.")
 
 
 # ==============================================================================

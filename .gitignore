@@ -49,3 +49,11 @@ Thumbs.db
 
 # Log files
 *.log
+
+# Temporary and local scratch files
+scratch/
+*.tsbuildinfo
+eval/replay_results.json
+.env.local
+.env.*.local
+

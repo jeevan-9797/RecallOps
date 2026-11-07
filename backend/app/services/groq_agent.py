@@ -18,11 +18,17 @@ from backend.app.schemas.agent_tools import (
     TOOL_DEFINITIONS,
     AgentTriageResponse,
 )
-from backend.app.services.hindsight_service import HindsightService, hindsight_service
+from backend.app.services.hindsight_service import (
+    HindsightService,
+    hindsight_service,
+    sanitize_engineer_id,
+)
 from backend.app.services.tool_handlers import AgentToolDispatcher
-from eval.system_prompts import (
+from backend.app.prompts.system_prompts import (
     BASELINE_NAIVE_SRE_PROMPT,
     PRODUCTION_RECALLOPS_SRE_PROMPT,
+    SENIOR_SRE_SYSTEM_PROMPT,
+    build_sre_system_prompt,
 )
 
 logger = logging.getLogger("recallops.agent")
@@ -62,6 +68,65 @@ class GroqAgent:
                 logger.warning(f"Could not initialize Groq SDK client: {e}")
                 self._client = None
         return self._client
+
+    def build_system_prompt(
+        self,
+        memory_enabled: bool = True,
+        engineer_id: Optional[str] = None,
+        unified_memory: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Constructs the authoritative system prompt via canonical build_sre_system_prompt.
+        - Memory ON: Injects recalled organizational precedents, negative-memory failed fix
+          warnings, and validated engineer style preferences.
+        - Memory OFF: Returns BASELINE_NAIVE_SRE_PROMPT with zero recalled context or preferences.
+        """
+        if not memory_enabled:
+            return BASELINE_NAIVE_SRE_PROMPT
+
+        mem = unified_memory or {}
+
+        # 1. Format recalled incident memories
+        similar = mem.get("similar_incidents", [])
+        if similar:
+            incident_lines = []
+            for inc in similar:
+                inc_id = inc.get("incident_id") or "INC-UNKNOWN"
+                sym = inc.get("symptom") or ""
+                cause = inc.get("root_cause") or ""
+                fix = inc.get("successful_fix") or ""
+                incident_lines.append(f"- [{inc_id}] Symptom: {sym} | Root Cause: {cause} | Fix: {fix}")
+            recalled_incidents_str = "\n".join(incident_lines)
+        else:
+            recalled_incidents_str = None
+
+        # 2. Format negative memory failed fixes
+        failed = mem.get("failed_fixes", [])
+        if failed:
+            failed_lines = []
+            for ff in failed:
+                directive = ff.get("warning_directive") or ff.get("failure_mode") or ff.get("action") or ""
+                if directive:
+                    failed_lines.append(f"- {directive}")
+            recalled_failed_str = "\n".join(failed_lines) if failed_lines else None
+        else:
+            recalled_failed_str = None
+
+        # 3. Format personal engineer preference
+        prefs = mem.get("engineer_preferences", [])
+        pref_texts = [
+            p.get("text") or p.get("content") or ""
+            for p in prefs
+            if p.get("text") or p.get("content")
+        ]
+        engineer_preference = " ".join(pref_texts) if pref_texts else None
+
+        return build_sre_system_prompt(
+            engineer_id=engineer_id,
+            engineer_preference=engineer_preference,
+            recalled_incident_memories=recalled_incidents_str,
+            recalled_failed_fixes=recalled_failed_str,
+        )
 
     async def stream_triage_loop(
         self,
@@ -111,7 +176,69 @@ class GroqAgent:
             logger.warning(f"Could not load logs: {e}")
             logs = []
 
-        # 3. Dual Memory Retrieval (if Memory is ON)
+        # 1 & 2. Resolve trusted incident context and service name from PostgreSQL
+        trusted_service_name = service_name
+        if self.db_repo and incident_id:
+            try:
+                inc_record = await self.db_repo.get_incident(incident_id)
+                if inc_record and inc_record.get("service_name"):
+                    trusted_service_name = inc_record["service_name"]
+            except Exception as inc_err:
+                logger.debug(f"Could not load trusted incident record for {incident_id}: {inc_err}")
+
+        # 3. Server-Derived Engineer Identity Resolution (P4C-R2)
+        # RecallOps derives personal memory bank selection strictly from trusted server-side
+        # PostgreSQL service ownership (services.owner_id == engineers.id).
+        # Caller-supplied engineer_id is NEVER used as the source of personal bank selection.
+        server_derived_engineer_id: Optional[str] = None
+        if memory_enabled:
+            trusted_owner: Optional[Dict[str, Any]] = None
+            if self.db_repo and hasattr(self.db_repo, "get_service_owner_engineer"):
+                try:
+                    trusted_owner = await self.db_repo.get_service_owner_engineer(trusted_service_name)
+                except Exception as repo_err:
+                    logger.warning(
+                        "SECURITY AUDIT: Failed to query service owner engineer for '%s' on incident '%s': %s",
+                        trusted_service_name,
+                        incident_id,
+                        repo_err,
+                    )
+
+            if trusted_owner and trusted_owner.get("handle"):
+                server_derived_engineer_id = str(trusted_owner["handle"]).strip().lower()
+                logger.info(
+                    "SECURITY AUDIT: Server-derived engineer identity '%s' resolved from PostgreSQL ownership of service '%s' for incident '%s'.",
+                    server_derived_engineer_id,
+                    trusted_service_name,
+                    incident_id,
+                )
+            else:
+                logger.info(
+                    "SECURITY AUDIT: Service '%s' has no valid registered owner engineer in database. Zero personal memory banks will be queried for incident '%s'.",
+                    trusted_service_name,
+                    incident_id,
+                )
+
+            # Audit check on caller-supplied parameter (retained for backward-compatible interface)
+            if engineer_id and str(engineer_id).strip():
+                clean_requested = str(engineer_id).strip().lstrip("@").lower()
+                if server_derived_engineer_id and clean_requested != server_derived_engineer_id:
+                    logger.warning(
+                        "SECURITY AUDIT: Caller-supplied engineer_id '%s' ignored. Personal memory strictly derived from PostgreSQL service owner '%s' for service '%s' on incident '%s'.",
+                        clean_requested,
+                        server_derived_engineer_id,
+                        trusted_service_name,
+                        incident_id,
+                    )
+                elif not server_derived_engineer_id:
+                    logger.warning(
+                        "SECURITY AUDIT: Caller-supplied engineer_id '%s' ignored. Service '%s' has no registered owner engineer on incident '%s'.",
+                        clean_requested,
+                        trusted_service_name,
+                        incident_id,
+                    )
+
+        # 4. Dual Memory Retrieval (if Memory is ON)
         unified_memory: Dict[str, Any] = {
             "similar_incidents": [],
             "failed_fixes": [],
@@ -122,9 +249,9 @@ class GroqAgent:
         if memory_enabled:
             try:
                 unified_memory = await self.hindsight.retrieve_unified_memory(
-                    service_name=service_name,
+                    service_name=trusted_service_name,
                     symptom=symptom,
-                    engineer_id=engineer_id,
+                    engineer_id=server_derived_engineer_id,
                 )
 
                 # Emit memory_hit events for every retrieved memory
@@ -160,51 +287,41 @@ class GroqAgent:
             logger.info(f"[OFFLINE AGENT] Executing simulated investigation for {incident_id}")
             async for evt in self._stream_simulated_triage(
                 incident_id=incident_id,
-                service_name=service_name,
+                service_name=trusted_service_name,
                 symptom=symptom,
                 owner=owner,
                 deploys=deploys,
                 logs=logs,
                 unified_memory=unified_memory,
                 memory_enabled=memory_enabled,
+                engineer_id=server_derived_engineer_id,
             ):
                 yield evt
             return
 
         # LIVE GROQ AGENT LOOP
-        system_prompt = PRODUCTION_RECALLOPS_SRE_PROMPT if memory_enabled else BASELINE_NAIVE_SRE_PROMPT
+        system_prompt = self.build_system_prompt(
+            memory_enabled=memory_enabled,
+            engineer_id=server_derived_engineer_id,
+            unified_memory=unified_memory,
+        )
 
         # Build comprehensive operational briefing
         user_prompt_lines = [
-            f"CRITICAL INCIDENT ALERT:",
+            "CRITICAL INCIDENT ALERT:",
             f"Incident ID: {incident_id}",
             f"Affected Service: {service_name}",
             f"Observed Symptom: {symptom}",
             f"Service Owner: {owner}",
-            f"Recent Deploys ({len(deploys)} found): {json.dumps(deploys[:3])}",
-            f"Recent Logs ({len(logs)} lines found): {json.dumps(logs[:5])}",
+            "",
+            "OPERATIONAL TOOL USAGE INSTRUCTIONS:",
+            "- You may call available tools (recall_similar_incidents, recall_failed_fixes, get_recent_deploys, get_logs, get_service_owner, post_to_band_room) to gather facts.",
+            "- Always use the exact snake_case tool names listed above. Never use camelCase names.",
+            "- When concluding your investigation, do NOT call 'AgentTriageResponse', 'agent_output', 'json', or any other function name to submit your diagnosis.",
+            "- Instead, emit your final conclusion directly as a valid JSON text object matching the AgentTriageResponse schema in your text response.",
         ]
 
-        if memory_enabled:
-            if unified_memory["similar_incidents"]:
-                user_prompt_lines.append(
-                    f"\nRECALLED ORGANIZATIONAL PRECEDENTS ({len(unified_memory['similar_incidents'])}):\n"
-                    f"{json.dumps(unified_memory['similar_incidents'])}"
-                )
-            if unified_memory["failed_fixes"]:
-                user_prompt_lines.append(
-                    f"\nCRITICAL NEGATIVE-MEMORY WARNINGS ({len(unified_memory['failed_fixes'])}):\n"
-                    f"{json.dumps(unified_memory['failed_fixes'])}\n"
-                    f"GUARDRAIL MANDATE: You MUST NOT recommend any action listed under NEGATIVE-MEMORY WARNINGS. "
-                    f"If your preliminary reasoning considered any such action, REJECT IT immediately and formulate an alternative hypothesis and action."
-                )
-            if unified_memory["engineer_preferences"]:
-                user_prompt_lines.append(
-                    f"\nENGINEER WORKFLOW PREFERENCES ({len(unified_memory['engineer_preferences'])}):\n"
-                    f"{json.dumps(unified_memory['engineer_preferences'])}\n"
-                    f"NOTE: Personal preferences must never override organizational safety warnings."
-                )
-        else:
+        if not memory_enabled:
             user_prompt_lines.append(
                 "\nPerform telemetry investigation using available operational tools and diagnose the root cause."
             )
@@ -227,8 +344,9 @@ class GroqAgent:
 
         current_model = self.primary_model
         iteration = 0
+        triage_obj: Optional[AgentTriageResponse] = None
 
-        while iteration < self.max_iterations:
+        while iteration < self.max_iterations and not triage_obj:
             iteration += 1
             completion = None
 
@@ -241,6 +359,33 @@ class GroqAgent:
                     temperature=0.0,
                 )
             except Exception as err:
+                # 1. Check if Groq rejected an undeclared output tool call (e.g. 'agent_output', 'AgentTriageResponse', 'json')
+                recovered_obj = self._extract_failed_generation(err, incident_id, service_name)
+                if recovered_obj:
+                    logger.info("Successfully recovered AgentTriageResponse from Groq failed_generation payload.")
+                    triage_obj = recovered_obj
+                    break
+
+                # 2. If tool calling error, attempt immediate direct text synthesis with tools=None
+                err_str = str(err).lower()
+                if "tool" in err_str or getattr(err, "code", "") == "tool_use_failed":
+                    try:
+                        logger.info("Attempting direct text synthesis with tools=None after tool validation error...")
+                        synth = client.chat.completions.create(
+                            model=current_model,
+                            messages=messages,
+                            tools=None,
+                            temperature=0.0,
+                        )
+                        if synth and synth.choices:
+                            synth_content = synth.choices[0].message.content or ""
+                            triage_obj = self._parse_agent_response(synth_content, incident_id, service_name)
+                            if triage_obj:
+                                break
+                    except Exception as synth_err:
+                        logger.warning(f"Synthesis fallback failed: {synth_err}")
+
+                # 3. Failover to fallback model if not already on fallback
                 logger.warning(f"Model '{current_model}' encountered error: {err}. Attempting fallback...")
                 if current_model != self.fallback_model:
                     current_model = self.fallback_model
@@ -260,6 +405,11 @@ class GroqAgent:
                             temperature=0.0,
                         )
                     except Exception as fallback_err:
+                        # Also attempt failed_generation extraction on fallback error
+                        fallback_recovered = self._extract_failed_generation(fallback_err, incident_id, service_name)
+                        if fallback_recovered:
+                            triage_obj = fallback_recovered
+                            break
                         logger.error(f"Fallback model failed as well: {fallback_err}")
                         break
                 else:
@@ -286,12 +436,40 @@ class GroqAgent:
             if tool_calls:
                 messages.append(message)
                 for tc in tool_calls:
-                    fn_name = tc.function.name
+                    raw_fn_name = tc.function.name
                     raw_args = tc.function.arguments
                     try:
                         parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                     except Exception:
                         parsed_args = {}
+
+                    # Normalization for tool names (handling camelCase or tool aliases)
+                    name_map = {
+                        "recallsimilarincidents": "recall_similar_incidents",
+                        "recall_similar_incidents": "recall_similar_incidents",
+                        "recallfailedfixes": "recall_failed_fixes",
+                        "recall_failed_fixes": "recall_failed_fixes",
+                        "getrecentdeploys": "get_recent_deploys",
+                        "get_recent_deploys": "get_recent_deploys",
+                        "getlogs": "get_logs",
+                        "get_logs": "get_logs",
+                        "getserviceowner": "get_service_owner",
+                        "get_service_owner": "get_service_owner",
+                        "posttobandroom": "post_to_band_room",
+                        "post_to_band_room": "post_to_band_room",
+                    }
+                    fn_name = name_map.get(raw_fn_name.lower().replace("_", ""), raw_fn_name)
+
+                    # Check if the model emitted its final diagnosis as a tool call
+                    if fn_name in ("AgentTriageResponse", "agent_output", "json") or raw_fn_name in ("AgentTriageResponse", "agent_output", "json"):
+                        parsed_candidate = self._parse_agent_response(
+                            json.dumps(parsed_args) if isinstance(parsed_args, dict) else str(parsed_args),
+                            incident_id,
+                            service_name,
+                        )
+                        if parsed_candidate:
+                            triage_obj = parsed_candidate
+                            break
 
                     yield (
                         "tool_call",
@@ -352,35 +530,60 @@ class GroqAgent:
                         "tool_call_id": tc.id,
                         "content": json.dumps(tool_output),
                     })
+                if triage_obj:
+                    break
                 continue
 
-            # Model produced final diagnosis
+            # Model produced final diagnosis as normal content
             content = message.content or ""
-            triage_obj = self._parse_agent_response(content, incident_id, service_name)
-            if triage_obj:
-                # Step 3 requirement: Validate all cited incident IDs against PostgreSQL
-                triage_obj.cited_incident_ids = await self._validate_citations(triage_obj.cited_incident_ids)
+            parsed_content_obj = self._parse_agent_response(content, incident_id, service_name)
+            if parsed_content_obj:
+                triage_obj = parsed_content_obj
+                break
 
-                # Ensure negative memory warnings are preserved
-                if memory_enabled and unified_memory["failed_fixes"]:
-                    for ff in unified_memory["failed_fixes"]:
-                        directive = ff.get("warning_directive") or ff.get("failure_mode")
-                        if directive and directive not in triage_obj.failed_fixes_warning:
-                            triage_obj.failed_fixes_warning.append(directive)
-
-                yield ("suggestion", triage_obj.model_dump())
-                yield (
-                    "done",
-                    {
-                        "incident_id": incident_id,
-                        "status": "completed",
-                        "memory_enabled": memory_enabled,
-                        "memory_augmented": memory_enabled,
-                        "model_used": current_model,
-                        "iterations": iteration,
-                    },
+        # If loop completed tool iterations without a diagnosis, run a final synthesis pass with tools=None
+        if not triage_obj and client:
+            try:
+                logger.info("Requesting final triage conclusion with tools=None...")
+                synthesis = client.chat.completions.create(
+                    model=current_model,
+                    messages=messages + [{
+                        "role": "user",
+                        "content": "Conclude your investigation now. Provide your final triage diagnosis adhering strictly to the AgentTriageResponse JSON schema.",
+                    }],
+                    tools=None,
+                    temperature=0.0,
                 )
-                return
+                if synthesis and synthesis.choices:
+                    synth_content = synthesis.choices[0].message.content or ""
+                    triage_obj = self._parse_agent_response(synth_content, incident_id, service_name)
+            except Exception as synth_err:
+                logger.warning(f"Final synthesis pass failed: {synth_err}")
+
+        if triage_obj:
+            # Step 3 requirement: Validate all cited incident IDs against PostgreSQL
+            triage_obj.cited_incident_ids = await self._validate_citations(triage_obj.cited_incident_ids)
+
+            # Ensure negative memory warnings are preserved
+            if memory_enabled and unified_memory.get("failed_fixes"):
+                for ff in unified_memory["failed_fixes"]:
+                    directive = ff.get("warning_directive") or ff.get("failure_mode")
+                    if directive and directive not in triage_obj.failed_fixes_warning:
+                        triage_obj.failed_fixes_warning.append(directive)
+
+            yield ("suggestion", triage_obj.model_dump())
+            yield (
+                "done",
+                {
+                    "incident_id": incident_id,
+                    "status": "completed",
+                    "memory_enabled": memory_enabled,
+                    "memory_augmented": memory_enabled,
+                    "model_used": current_model,
+                    "iterations": iteration,
+                },
+            )
+            return
 
         # Fallback if loop exhausted or model failed
         logger.warning(f"ReAct loop exhausted without valid diagnosis. Emitting safe fallback.")
@@ -455,6 +658,45 @@ class GroqAgent:
                 logger.error(f"Error verifying cited incident '{cid}' in database: {e}")
         return valid
 
+    def _extract_failed_generation(
+        self,
+        err: Exception,
+        incident_id: str,
+        service_name: str,
+    ) -> Optional[AgentTriageResponse]:
+        """
+        Recovers AgentTriageResponse from Groq's BadRequestError failed_generation payload.
+        This occurs when models like openai/gpt-oss-120b output their final conclusion formatted
+        as an undeclared tool call (e.g. 'agent_output', 'AgentTriageResponse', or 'json') instead
+        of a raw text completion.
+        """
+        body = getattr(err, "body", None)
+        if not isinstance(body, dict):
+            response = getattr(err, "response", None)
+            if response and hasattr(response, "json"):
+                try:
+                    body = response.json()
+                except Exception:
+                    body = None
+
+        if isinstance(body, dict):
+            err_dict = body.get("error", {})
+            fg = err_dict.get("failed_generation")
+            if fg:
+                try:
+                    data = json.loads(fg) if isinstance(fg, str) else fg
+                    if isinstance(data, dict):
+                        args = data.get("arguments", data)
+                        if isinstance(args, str):
+                            args = json.loads(args)
+                        if isinstance(args, dict):
+                            if not args.get("incident_id"):
+                                args["incident_id"] = incident_id
+                            return AgentTriageResponse.model_validate(args)
+                except Exception as parse_e:
+                    logger.debug(f"Could not parse failed_generation: {parse_e}")
+        return None
+
     def _parse_agent_response(self, text: str, incident_id: str, service_name: str) -> Optional[AgentTriageResponse]:
         """Parses model text into structured AgentTriageResponse contract."""
         cleaned = text.strip()
@@ -489,6 +731,7 @@ class GroqAgent:
         logs: List[Dict[str, Any]],
         unified_memory: Dict[str, Any],
         memory_enabled: bool,
+        engineer_id: Optional[str] = None,
     ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
         """Deterministic simulated triage execution for offline testing and mock runs."""
         # Tool: get_logs
@@ -555,6 +798,24 @@ class GroqAgent:
             # Formulate targeted memory-augmented suggestion
             cited = ["INC-1987"]
             valid_cited = await self._validate_citations(cited)
+
+            # Style adaptation matching canonical prompt rules
+            eng_prefs = unified_memory.get("engineer_preferences", [])
+            pref_text = " ".join([p.get("text", "") or p.get("content", "") for p in eng_prefs]).lower() if eng_prefs else ""
+            clean_eng = (engineer_id or "").lower()
+
+            if "priya" in clean_eng or "concise" in pref_text or "terse" in pref_text or "cli" in pref_text:
+                recommended_action = f"kubectl rollout undo deployment/{service_name} && kubectl scale deployment/pgbouncer --replicas=3"
+            elif "rahul" in clean_eng or "detailed" in pref_text or "step" in pref_text or "architectural" in pref_text:
+                recommended_action = (
+                    f"1. Immediate mitigation: Execute rollback for {service_name} via Helm: `helm rollback {service_name}`.\n"
+                    f"2. Database isolation: Throttle connection pool ceiling on PgBouncer to 40 connections.\n"
+                    f"3. Verification: Monitor p99 latency on Datadog checkout dashboard for 10 minutes.\n"
+                    f"4. Rollback trigger: If error rate exceeds 1% post-rollback, divert traffic to secondary region."
+                )
+            else:
+                recommended_action = f"Rollback {service_name} to previous release and apply connection pooler limits."
+
             triage_obj = AgentTriageResponse(
                 incident_id=incident_id,
                 hypothesis=f"Database connection pool exhaustion caused by unindexed query introduced in recent release on {service_name}.",
@@ -563,7 +824,7 @@ class GroqAgent:
                 failed_fixes_warning=[
                     "Do NOT restart payments-db: failed 2x in Sept (INC-1987) and caused cascading outage",
                 ],
-                recommended_action=f"Rollback {service_name} to previous release and apply connection pooler limits.",
+                recommended_action=recommended_action,
                 likely_owner=owner or "payments-platform-team (@alice-sre)",
             )
         else:

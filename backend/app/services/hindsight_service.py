@@ -20,6 +20,14 @@ from backend.app.config import settings
 logger = logging.getLogger("recallops.hindsight")
 
 
+def _scrub_credentials(message: str) -> str:
+    """Masks API keys, tokens, and credentials from log strings."""
+    scrubbed = re.sub(r'(bearer\s+)[a-zA-Z0-9_\-\.]{8,}', r'\1***', message, flags=re.IGNORECASE)
+    scrubbed = re.sub(r'(key|token|secret|password)\s*[:=]\s*[\'"]?[a-zA-Z0-9_\-\.]{8,}[\'"]?', r'\1=***', scrubbed, flags=re.IGNORECASE)
+    scrubbed = re.sub(r'(://[^:/\s@]+:)[^@\s]+@', r'\1***@', scrubbed)
+    return scrubbed
+
+
 def sanitize_engineer_id(engineer_id: str) -> str:
     """
     Validates and normalizes engineer identifier to prevent arbitrary bank targeting.
@@ -33,6 +41,9 @@ def sanitize_engineer_id(engineer_id: str) -> str:
     return cleaned
 
 
+_DEFAULT = object()
+
+
 class HindsightService:
     """
     Centralized dual-memory interface managing organizational knowledge (kartly-sre)
@@ -44,16 +55,19 @@ class HindsightService:
     def __init__(
         self,
         endpoint: Optional[str] = None,
-        api_key: Optional[str] = None,
+        api_key: Any = _DEFAULT,
         bank_id: Optional[str] = None,
         default_bank_id: Optional[str] = None,
         timeout: float = 10.0,
+        enabled: Optional[bool] = None,
     ):
         self.endpoint = endpoint or settings.HINDSIGHT_ENDPOINT
-        self.api_key = api_key or settings.HINDSIGHT_API_KEY
+        self.api_key = settings.HINDSIGHT_API_KEY if api_key is _DEFAULT else api_key
         self.default_bank_id = bank_id or default_bank_id or self.ORGANIZATIONAL_BANK
         self.timeout = timeout
+        self.enabled = enabled if enabled is not None else settings.HINDSIGHT_ENABLED
         self._client = None
+        self._last_liveness: Optional[Dict[str, Any]] = None
 
         # Known simulated banks for offline/mock test environments
         self._offline_banks: set[str] = {
@@ -101,8 +115,12 @@ class HindsightService:
         }
 
     def _get_client(self):
-        """Lazy client initializer."""
-        if self._client is None and self.api_key and not self.api_key.startswith("your_"):
+        """Lazy client initializer. Returns None if Hindsight Cloud is disabled."""
+        if not self.enabled:
+            return None
+        if self._client is not None:
+            return self._client
+        if self.api_key and not self.api_key.startswith("your_"):
             try:
                 from hindsight_client import Hindsight
                 self._client = Hindsight(
@@ -111,24 +129,140 @@ class HindsightService:
                     timeout=self.timeout,
                 )
             except Exception as e:
-                logger.warning(f"Failed to initialize live Hindsight client: {e}")
+                logger.warning(f"Failed to initialize live Hindsight client: {_scrub_credentials(str(e))}")
                 self._client = None
         return self._client
 
-    def bank_exists(self, bank_id: str) -> bool:
+    async def aclose(self):
+        """Closes the underlying async client session."""
+        if self._client and hasattr(self._client, "aclose"):
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+            self._client = None
+
+    async def bank_exists(self, bank_id: str) -> bool:
         """
-        Validates whether the specified bank exists in Hindsight.
+        Validates whether the specified bank exists in Hindsight asynchronously.
         Never silently substitutes kartly-sre if an engineer bank is missing.
         """
         client = self._get_client()
         if client:
             try:
-                cfg = client.get_bank_config(bank_id)
+                cfg = await client.aget_bank_config(bank_id)
                 return bool(cfg)
             except Exception:
                 return False
         # Offline mode
         return bank_id in self._offline_banks
+
+    abank_exists = bank_exists
+
+    async def create_bank(
+        self,
+        bank_id: str,
+        name: Optional[str] = None,
+        mission: Optional[str] = None,
+    ) -> bool:
+        """
+        Creates a bank in Hindsight Cloud asynchronously.
+        """
+        client = self._get_client()
+        if not client:
+            self._offline_banks.add(bank_id)
+            return True
+        try:
+            await client.acreate_bank(bank_id=bank_id, name=name, mission=mission)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create Hindsight bank '{bank_id}': {_scrub_credentials(str(e))}")
+            return False
+
+    acreate_bank = create_bank
+
+    async def check_cloud_liveness(self) -> Dict[str, Any]:
+        """
+        Non-destructive health and authentication probe against Hindsight Cloud.
+        Uses aget_version() - does not create banks or retain/recall memories.
+        """
+        if not self.enabled:
+            res = {
+                "status": "offline_mode",
+                "reachable": False,
+                "authenticated": False,
+                "mode": "offline_mock",
+                "version": None,
+                "endpoint": self.endpoint,
+                "error": "Hindsight Cloud integration is parked (HINDSIGHT_ENABLED=false); using verified offline mock provider.",
+            }
+            self._last_liveness = res
+            return res
+
+        client = self._get_client()
+        if not client:
+            res = {
+                "status": "offline_mode",
+                "reachable": False,
+                "authenticated": False,
+                "mode": "offline_mock",
+                "version": None,
+                "endpoint": self.endpoint,
+                "error": "No HINDSIGHT_API_KEY configured; running in local offline mock mode.",
+            }
+            self._last_liveness = res
+            return res
+
+        try:
+            resp = await client.aget_version()
+            version_val = getattr(resp, "version", None) or getattr(resp, "build", None) or str(resp)
+            res = {
+                "status": "connected",
+                "reachable": True,
+                "authenticated": True,
+                "mode": "live_cloud",
+                "version": str(version_val),
+                "endpoint": self.endpoint,
+                "error": None,
+            }
+            self._last_liveness = res
+            return res
+        except Exception as exc:
+            error_str = _scrub_credentials(str(exc))
+            status_code = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+
+            if status_code in (401, 403) or "unauthorized" in error_str.lower() or "forbidden" in error_str.lower():
+                res = {
+                    "status": "unauthenticated",
+                    "reachable": True,
+                    "authenticated": False,
+                    "mode": "live_cloud",
+                    "version": None,
+                    "endpoint": self.endpoint,
+                    "error": "Authentication failed: invalid or expired Hindsight API key (HTTP 401/403).",
+                }
+            elif status_code and status_code >= 500:
+                res = {
+                    "status": "server_error",
+                    "reachable": True,
+                    "authenticated": True,
+                    "mode": "live_cloud",
+                    "version": None,
+                    "endpoint": self.endpoint,
+                    "error": f"Hindsight Cloud server error (HTTP {status_code}).",
+                }
+            else:
+                res = {
+                    "status": "unreachable",
+                    "reachable": False,
+                    "authenticated": False,
+                    "mode": "live_cloud",
+                    "version": None,
+                    "endpoint": self.endpoint,
+                    "error": f"Hindsight Cloud endpoint unreachable: {error_str}",
+                }
+            self._last_liveness = res
+            return res
 
     async def remember_incident(
         self,
@@ -178,7 +312,7 @@ class HindsightService:
 
         try:
             metadata_str = {k: str(v) for k, v in metadata.items()}
-            client.retain(
+            await client.aretain(
                 bank_id=target_bank,
                 content=content,
                 context="episodic_resolution",
@@ -187,7 +321,7 @@ class HindsightService:
             )
             return True
         except Exception as e:
-            logger.error(f"Hindsight remember_incident failed for {incident_id}: {e}")
+            logger.error(f"Hindsight remember_incident failed for {incident_id}: {_scrub_credentials(str(e))}")
             return False
 
     async def remember_fix_outcome(
@@ -253,7 +387,7 @@ class HindsightService:
 
         try:
             metadata_str = {k: str(v) for k, v in metadata.items()}
-            client.retain(
+            await client.aretain(
                 bank_id=target_bank,
                 content=content,
                 context=memory_type,
@@ -262,7 +396,7 @@ class HindsightService:
             )
             return True
         except Exception as e:
-            logger.error(f"Hindsight remember_fix_outcome failed: {e}")
+            logger.error(f"Hindsight remember_fix_outcome failed: {_scrub_credentials(str(e))}")
             return False
 
     async def remember_engineer_preference(
@@ -307,7 +441,7 @@ class HindsightService:
             return True
 
         try:
-            client.retain(
+            await client.aretain(
                 bank_id=target_bank,
                 content=text,
                 context="engineer_preference",
@@ -316,7 +450,7 @@ class HindsightService:
             )
             return True
         except Exception as e:
-            logger.error(f"Hindsight remember_engineer_preference failed for {clean_id}: {e}")
+            logger.error(f"Hindsight remember_engineer_preference failed for {clean_id}: {_scrub_credentials(str(e))}")
             return False
 
     async def recall_similar(
@@ -356,7 +490,7 @@ class HindsightService:
             return []
 
         try:
-            resp = client.recall(
+            resp = await client.arecall(
                 bank_id=target_bank,
                 query=query,
                 tags=["episodic_resolution"],
@@ -384,7 +518,7 @@ class HindsightService:
                 })
             return normalized
         except Exception as e:
-            logger.warning(f"Hindsight recall_similar failed for bank {target_bank}: {e}")
+            logger.warning(f"Hindsight recall_similar failed for bank {target_bank}: {_scrub_credentials(str(e))}")
             return []
 
     async def recall_failed_fixes(
@@ -420,7 +554,7 @@ class HindsightService:
             return []
 
         try:
-            resp = client.recall(
+            resp = await client.arecall(
                 bank_id=target_bank,
                 query=query,
                 tags=["failed_fix"],
@@ -443,7 +577,7 @@ class HindsightService:
                 })
             return normalized
         except Exception as e:
-            logger.warning(f"Hindsight recall_failed_fixes failed: {e}")
+            logger.warning(f"Hindsight recall_failed_fixes failed: {_scrub_credentials(str(e))}")
             return []
 
     async def recall_engineer_preferences(
@@ -467,7 +601,7 @@ class HindsightService:
         target_bank = f"engineer-{clean_id}"
 
         # Invariant 4 & 5: Check bank existence; never substitute kartly-sre
-        if not self.bank_exists(target_bank):
+        if not await self.bank_exists(target_bank):
             logger.info(f"Engineer preference bank '{target_bank}' does not exist. Returning empty preferences.")
             return []
 
@@ -477,7 +611,7 @@ class HindsightService:
 
         try:
             query = context or "troubleshooting workflow, communication style, diagnostic preferences"
-            resp = client.recall(
+            resp = await client.arecall(
                 bank_id=target_bank,
                 query=query,
                 tags=["engineer_preference"],
@@ -495,7 +629,7 @@ class HindsightService:
                 })
             return normalized
         except Exception as e:
-            logger.warning(f"Failed to recall preferences from '{target_bank}': {e}")
+            logger.warning(f"Failed to recall preferences from '{target_bank}': {_scrub_credentials(str(e))}")
             return []
 
     async def retrieve_unified_memory(
@@ -585,7 +719,7 @@ class HindsightService:
             ]
 
         try:
-            resp = client.reflect(
+            resp = await client.areflect(
                 bank_id=target_bank,
                 query=query,
             )
@@ -596,7 +730,7 @@ class HindsightService:
             lines = [line.strip().lstrip("-*123456789. ") for line in text.split("\n") if line.strip()]
             return lines if lines else [text]
         except Exception as e:
-            logger.warning(f"Hindsight learned_patterns failed: {e}")
+            logger.warning(f"Hindsight learned_patterns failed: {_scrub_credentials(str(e))}")
             return ["Reflect synthesis temporarily unavailable."]
 
 

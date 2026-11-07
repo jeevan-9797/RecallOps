@@ -2,10 +2,14 @@
 RecallOps Centralized Exception Hierarchy and HTTP Exception Handlers.
 """
 
+import logging
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from backend.app.config import settings
+
+logger = logging.getLogger("recallops.exceptions")
 
 
 class RecallOpsException(Exception):
@@ -75,13 +79,20 @@ def setup_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
+        logger.exception(f"Unhandled server exception during request processing: {exc}")
+        is_prod = (settings.ENVIRONMENT or "").strip().lower() == "production"
+        if is_prod or not settings.DEBUG_MODE:
+            details: Dict[str, Any] = {}
+        else:
+            details = {"exception_type": type(exc).__name__, "message": str(exc)}
+
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "error": {
                     "code": "INTERNAL_SERVER_ERROR",
                     "message": "An unexpected error occurred during request processing.",
-                    "details": {"exception_type": type(exc).__name__, "message": str(exc)},
+                    "details": details,
                 }
             },
         )

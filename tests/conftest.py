@@ -52,8 +52,12 @@ def client(test_db_session_factory):
         async with session_factory() as session:
             yield session
 
+    from unittest.mock import patch
+
     app.dependency_overrides[get_db_session] = override_get_db_session
-    with TestClient(app) as test_client:
-        yield test_client
+    with patch("backend.app.services.groq_agent.GroqAgent._get_client", return_value=None), \
+         patch("backend.app.services.hindsight_service.hindsight_service._get_client", return_value=None):
+        with TestClient(app) as test_client:
+            yield test_client
     app.dependency_overrides.clear()
     asyncio.run(engine.dispose())

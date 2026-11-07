@@ -37,6 +37,14 @@ class DatabaseRepositoryInterface(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def get_service_owner_engineer(self, service_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the trusted owner Engineer record for a given service.
+        Used for server-side identity authorization and personal memory isolation.
+        """
+        pass
+
+    @abc.abstractmethod
     async def get_recent_deploys(self, service_name: str, lookback_hours: int = 24) -> List[Dict[str, Any]]:
         pass
 
@@ -135,6 +143,35 @@ class SQLAlchemyRepository(DatabaseRepositoryInterface):
         if row and row[0]:
             return f"{row[0].team} squad"
         return f"{service_name}-squad"
+
+    async def get_service_owner_engineer(self, service_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the trusted owner Engineer record for a given service.
+        Returns engineer metadata including normalized handle for identity verification.
+        """
+        if not self.session:
+            return None
+
+        stmt = (
+            select(Engineer, Service)
+            .join(Service, Service.owner_id == Engineer.id)
+            .where(Service.name == service_name)
+        )
+        res = await self.session.execute(stmt)
+        row = res.first()
+        if not row:
+            return None
+
+        eng, svc = row
+        handle = eng.slack_handle.lstrip("@").split(".")[0].lower() if eng.slack_handle else eng.name.split()[0].lower()
+        return {
+            "id": eng.id,
+            "name": eng.name,
+            "team": eng.team,
+            "slack_handle": eng.slack_handle,
+            "handle": handle,
+            "service_name": svc.name,
+        }
 
     async def get_recent_deploys(self, service_name: str, lookback_hours: int = 24) -> List[Dict[str, Any]]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
@@ -279,6 +316,19 @@ class SQLAlchemyRepository(DatabaseRepositoryInterface):
             at=datetime.now(timezone.utc),
         )
         self.session.add(fix)
+
+        if suggestion_id:
+            try:
+                clean_sug_id = int(str(suggestion_id).replace("SUG-", "").strip())
+                is_accepted = outcome in ("worked", "partial")
+                await self.session.execute(
+                    update(AgentSuggestion)
+                    .where(AgentSuggestion.id == clean_sug_id)
+                    .values(accepted=is_accepted)
+                )
+            except Exception:
+                pass
+
         await self.session.commit()
         return True
 
@@ -471,6 +521,18 @@ class SQLAlchemyRepository(DatabaseRepositoryInterface):
                 )
 
         await self.session.commit()
+
+        # Ensure PostgreSQL sequences advance past fixture IDs
+        try:
+            for tbl in ("engineers", "services", "deploys", "alerts", "incidents", "log_lines"):
+                seq_res = await self.session.execute(text(f"SELECT pg_get_serial_sequence('{tbl}', 'id')"))
+                seq_name = seq_res.scalar()
+                if seq_name:
+                    await self.session.execute(text(f"SELECT setval('{seq_name}', (SELECT COALESCE(MAX(id), 1) FROM {tbl}))"))
+            await self.session.commit()
+        except Exception:
+            pass
+
         return {
             "services_seeded": len(services_data),
             "engineers_seeded": len(engineers_data),

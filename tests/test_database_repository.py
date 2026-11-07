@@ -80,6 +80,37 @@ def test_get_service_owner(async_repo):
     asyncio.run(_test())
 
 
+def test_get_service_owner_engineer(async_repo):
+    async def _test():
+        engine, session, repo = await async_repo()
+        try:
+            await repo.seed_demo_data()
+
+            # Should return structured Engineer dictionary for checkout-api owner (Priya Sharma)
+            eng = await repo.get_service_owner_engineer("checkout-api")
+            assert eng is not None
+            assert eng["id"] == 4
+            assert eng["name"] == "Priya Sharma"
+            assert eng["handle"] == "priya"
+            assert eng["slack_handle"] == "@priya.sharma"
+            assert eng["service_name"] == "checkout-api"
+
+            # Should return Diya for orders-worker
+            diya = await repo.get_service_owner_engineer("orders-worker")
+            assert diya is not None
+            assert diya["handle"] == "diya"
+            assert diya["id"] == 2
+
+            # Non-existent service returns None
+            missing = await repo.get_service_owner_engineer("non-existent-service")
+            assert missing is None
+        finally:
+            await session.close()
+            await engine.dispose()
+
+    asyncio.run(_test())
+
+
 def test_deploys_and_logs_queries(async_repo):
     async def _test():
         engine, session, repo = await async_repo()

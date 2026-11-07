@@ -354,6 +354,7 @@ async def test_triage_flow_unaffected_by_band_failure():
 
     # 2. ReAct triage loop execution
     agent = GroqAgent(tool_dispatcher=dispatcher, db_repo=repo, hindsight=hindsight)
+    agent._client = False  # Ensure unit test runs simulated triage deterministically
     events = []
     async for event_type, data in agent.stream_triage_loop(
         incident_id="INC-2045",

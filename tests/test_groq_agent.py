@@ -35,6 +35,7 @@ def mock_agent():
         band = MockBandAdapter()
         dispatcher = AgentToolDispatcher(db_repo=repo, hindsight=hindsight, band=band)
         agent = GroqAgent(tool_dispatcher=dispatcher)
+        agent._client = False  # Ensure unit test exercises deterministic simulated triage
         return engine, session, agent
 
     return _setup
@@ -136,7 +137,7 @@ def test_agent_model_fallback_on_error(mock_agent):
             def mock_create(model, messages, **kwargs):
                 if model == "openai/gpt-oss-120b":
                     raise Exception("RateLimitError: 429 Too Many Requests")
-                elif model == "qwen/qwen3-32b":
+                elif model == agent.fallback_model or "qwen" in model:
                     # Return final message on fallback
                     mock_msg = MagicMock()
                     mock_msg.tool_calls = None
@@ -166,6 +167,196 @@ def test_agent_model_fallback_on_error(mock_agent):
             assert triage is not None
             assert "Fallback model" in triage.hypothesis
             assert triage.confidence == 0.88
+        finally:
+            await session.close()
+            await engine.dispose()
+
+    asyncio.run(_test())
+
+
+def test_extract_failed_generation_recovery(mock_agent):
+    async def _test():
+        engine, session, agent = await mock_agent()
+        try:
+            # Simulate Groq 400 BadRequestError with failed_generation
+            class MockBadRequestError(Exception):
+                def __init__(self, body):
+                    self.body = body
+
+            payload = {
+                "error": {
+                    "message": "Tool call validation failed: attempted to call tool 'agent_output' which was not in request.tools",
+                    "code": "tool_use_failed",
+                    "failed_generation": json.dumps({
+                        "name": "agent_output",
+                        "arguments": {
+                            "incident_id": "INC-2045",
+                            "hypothesis": "Connection pool exhaustion observed in checkout-api matching [INC-1987]",
+                            "confidence": 0.92,
+                            "cited_incident_ids": ["INC-1987"],
+                            "failed_fixes_warning": ["Do NOT restart payments-db"],
+                            "recommended_action": "kubectl rollout restart deployment/checkout-api",
+                            "likely_owner": "Priya Sharma (@priya.sharma)",
+                        }
+                    })
+                }
+            }
+            err = MockBadRequestError(payload)
+            res = agent._extract_failed_generation(err, "INC-2045", "checkout-api")
+            assert res is not None
+            assert isinstance(res, AgentTriageResponse)
+            assert res.incident_id == "INC-2045"
+            assert res.confidence == 0.92
+            assert "INC-1987" in res.cited_incident_ids
+            assert "Do NOT restart" in res.failed_fixes_warning[0]
+        finally:
+            await session.close()
+            await engine.dispose()
+
+    asyncio.run(_test())
+
+
+def test_agent_react_loop_recovers_from_groq_tool_use_failed(mock_agent):
+    async def _test():
+        engine, session, agent = await mock_agent()
+        try:
+            mock_client = MagicMock()
+            agent._client = mock_client
+
+            call_count = 0
+
+            class MockBadRequestError(Exception):
+                def __init__(self, body):
+                    self.body = body
+
+            def mock_create(model, messages, tools=None, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    # Model invokes recall_similar_incidents
+                    mock_tc = MagicMock()
+                    mock_tc.id = "call_123"
+                    mock_tc.function.name = "recall_similar_incidents"
+                    mock_tc.function.arguments = json.dumps({"service_name": "checkout-api", "symptom": "Latency spike"})
+                    mock_msg = MagicMock()
+                    mock_msg.tool_calls = [mock_tc]
+                    mock_msg.content = "Checking similar incidents..."
+                    mock_resp = MagicMock()
+                    mock_resp.choices = [MagicMock(message=mock_msg)]
+                    return mock_resp
+                elif call_count == 2:
+                    # Model attempts to output final diagnosis as agent_output tool call
+                    payload = {
+                        "error": {
+                            "message": "Tool call validation failed: attempted to call tool 'agent_output' which was not in request.tools",
+                            "code": "tool_use_failed",
+                            "failed_generation": json.dumps({
+                                "name": "agent_output",
+                                "arguments": {
+                                    "incident_id": "INC-2045",
+                                    "hypothesis": "Connection pool exhaustion verified with [INC-1987]",
+                                    "confidence": 0.94,
+                                    "cited_incident_ids": ["INC-1987"],
+                                    "failed_fixes_warning": ["Do NOT restart payments-db"],
+                                    "recommended_action": "kubectl patch configmap checkout-api-config -p '{\"data\":{\"MAX_DB_CONNECTIONS\":\"400\"}}'",
+                                    "likely_owner": "Priya Sharma (@priya.sharma)",
+                                }
+                            })
+                        }
+                    }
+                    raise MockBadRequestError(payload)
+
+            mock_client.chat.completions.create.side_effect = mock_create
+
+            events = []
+            async for evt_type, evt_data in agent.stream_triage_loop(
+                incident_id="INC-2045",
+                service_name="checkout-api",
+                symptom="Latency spike",
+                memory_enabled=True,
+            ):
+                events.append((evt_type, evt_data))
+
+            event_types = [e[0] for e in events]
+            assert "thought" in event_types
+            assert "tool_call" in event_types
+            assert "tool_result" in event_types
+            assert "suggestion" in event_types
+            assert "done" in event_types
+
+            # Verify suggestion payload
+            suggestion_evt = next(e[1] for e in events if e[0] == "suggestion")
+            assert suggestion_evt["confidence"] == 0.94
+            assert "INC-1987" in suggestion_evt["cited_incident_ids"]
+            assert any("Do NOT restart" in w for w in suggestion_evt["failed_fixes_warning"])
+
+            # Verify done event indicates primary model, not safe_fallback
+            done_evt = next(e[1] for e in events if e[0] == "done")
+            assert done_evt["model_used"] == agent.primary_model
+            assert done_evt["status"] == "completed"
+        finally:
+            await session.close()
+            await engine.dispose()
+
+    asyncio.run(_test())
+
+
+def test_agent_react_loop_normalizes_camelcase_tools(mock_agent):
+    async def _test():
+        engine, session, agent = await mock_agent()
+        try:
+            mock_client = MagicMock()
+            agent._client = mock_client
+
+            call_count = 0
+
+            def mock_create(model, messages, tools=None, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    # Model invokes camelCase recallSimilarIncidents
+                    mock_tc = MagicMock()
+                    mock_tc.id = "call_camel_1"
+                    mock_tc.function.name = "recallSimilarIncidents"
+                    mock_tc.function.arguments = json.dumps({"service_name": "checkout-api", "symptom": "Latency spike"})
+                    mock_msg = MagicMock()
+                    mock_msg.tool_calls = [mock_tc]
+                    mock_msg.content = "Querying memory..."
+                    mock_resp = MagicMock()
+                    mock_resp.choices = [MagicMock(message=mock_msg)]
+                    return mock_resp
+                elif call_count == 2:
+                    # Model returns conclusion as normal JSON
+                    mock_msg = MagicMock()
+                    mock_msg.tool_calls = None
+                    mock_msg.content = json.dumps({
+                        "incident_id": "INC-2045",
+                        "hypothesis": "Resolved via precedent [INC-1987]",
+                        "confidence": 0.91,
+                        "cited_incident_ids": ["INC-1987"],
+                        "failed_fixes_warning": [],
+                        "recommended_action": "Apply connection pool patch",
+                        "likely_owner": "Priya Sharma",
+                    })
+                    mock_resp = MagicMock()
+                    mock_resp.choices = [MagicMock(message=mock_msg)]
+                    return mock_resp
+
+            mock_client.chat.completions.create.side_effect = mock_create
+
+            events = []
+            async for evt_type, evt_data in agent.stream_triage_loop(
+                incident_id="INC-2045",
+                service_name="checkout-api",
+                symptom="Latency spike",
+                memory_enabled=True,
+            ):
+                events.append((evt_type, evt_data))
+
+            # Verify tool_call was normalized to recall_similar_incidents
+            tool_calls = [e[1] for e in events if e[0] == "tool_call"]
+            assert len(tool_calls) == 1
+            assert tool_calls[0]["tool"] == "recall_similar_incidents"
         finally:
             await session.close()
             await engine.dispose()

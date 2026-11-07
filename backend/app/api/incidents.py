@@ -10,15 +10,18 @@ Handles:
 import asyncio
 from datetime import datetime, timezone
 import logging
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.alerts import ACTIVE_INCIDENTS
+from backend.app.config import settings
 from backend.app.core.exceptions import IncidentNotFoundError
 from backend.app.core.sse import SSEEventTypes, format_sse
+from backend.app.db.models import Alert, Incident, Service
 from backend.app.db.repository import SQLAlchemyRepository
 from backend.app.db.session import get_db_session
 from backend.app.schemas.api_models import (
@@ -34,6 +37,28 @@ from backend.app.services.hindsight_service import hindsight_service
 from backend.app.services.tool_handlers import AgentToolDispatcher
 
 logger = logging.getLogger("recallops.api.incidents")
+
+
+def _scrub_credentials(message: str) -> str:
+    """Masks database passwords and credentials from error strings."""
+    import re
+    # Mask URL credentials: ://user:password@host -> ://user:***@host
+    scrubbed = re.sub(r'(://[^:/\s@]+:)[^@\s]+@', r'\1***@', message)
+    # Mask key-value password assignments
+    scrubbed = re.sub(r'((?:password|pwd|secret)\s*=\s*[\'"])[^\'"]+([\'"])', r'\1***\2', scrubbed, flags=re.IGNORECASE)
+    scrubbed = re.sub(r'((?:password|pwd|secret)\s*=\s*)[^\s,;]+', r'\1***', scrubbed, flags=re.IGNORECASE)
+    return scrubbed
+
+
+def sanitize_db_error(exc: Exception) -> str:
+    """
+    Sanitizes database exceptions to prevent credential or internal schema leakage.
+    In production, returns a generic error description.
+    In development mode, strips sensitive credentials.
+    """
+    if (settings.ENVIRONMENT or "").strip().lower() == "production":
+        return "Database operation failed"
+    return _scrub_credentials(str(exc)) or "Database operation failed"
 
 router = APIRouter(prefix="/incidents", tags=["Incidents"])
 
@@ -164,8 +189,8 @@ async def submit_feedback(
             note=payload.note,
         )
     except Exception as e:
-        logger.error(f"Database error persisting fix attempt: {e}")
-        db_error = str(e)
+        logger.error(f"Database error persisting fix attempt: {_scrub_credentials(str(e))}")
+        db_error = sanitize_db_error(e)
         persisted_to_db = False
 
     # Mirror in ephemeral registry for offline mock fallback
@@ -253,8 +278,8 @@ async def resolve_incident(
             duration_min=payload.duration_min,
         )
     except Exception as e:
-        logger.error(f"Database error resolving incident: {e}")
-        db_error = str(e)
+        logger.error(f"Database error resolving incident: {_scrub_credentials(str(e))}")
+        db_error = sanitize_db_error(e)
         persisted_to_db = False
 
     # Mirror in ephemeral registry for offline mock fallback
@@ -320,3 +345,129 @@ async def get_incident_memories(
         count=len(memories),
         memories=memories,
     )
+
+
+@router.get(
+    "",
+    summary="List Incidents for Frontend Dashboard",
+)
+async def list_incidents(
+    session: AsyncSession = Depends(get_db_session),
+) -> List[Dict[str, Any]]:
+    """
+    Returns incident summaries for the Incidents dashboard table.
+    Queries PostgreSQL incidents and blends any active ephemeral alerts.
+    """
+    results: List[Dict[str, Any]] = []
+    try:
+        stmt = (
+            select(Incident, Alert, Service)
+            .outerjoin(Alert, Incident.alert_id == Alert.id)
+            .outerjoin(Service, Alert.service_id == Service.id)
+            .order_by(Incident.opened_at.desc())
+        )
+        res = await session.execute(stmt)
+        for row in res.all():
+            inc, alert, svc = row
+            sev_raw = (inc.severity or "P1").upper()
+            sev_num = 1 if sev_raw in ("P1", "CRITICAL") else (2 if sev_raw in ("P2", "HIGH") else 3)
+            results.append({
+                "id": inc.code,
+                "severity": sev_num,
+                "service": svc.name if svc else "checkout-api",
+                "title": inc.root_cause or inc.code,
+                "summary": alert.payload.get("symptom", inc.root_cause) if alert else inc.root_cause,
+                "opened_at": inc.opened_at.isoformat() if inc.opened_at else datetime.now(timezone.utc).isoformat(),
+                "status": inc.status.lower() if inc.status else "open",
+                "alert": {
+                    "metric": alert.metric if alert else "p99_latency",
+                    "value": f"{alert.value}s" if alert else "6.2s",
+                    "threshold": f"{alert.threshold}s" if alert else "2s",
+                    "fired_at": alert.fired_at.isoformat() if alert else "03:14 IST",
+                } if alert else None,
+            })
+    except Exception as e:
+        logger.warning(f"Could not load incidents from database: {e}")
+
+    # Merge ephemeral active alerts from POST /api/alerts
+    seen_ids = {r["id"] for r in results}
+    for code, act in ACTIVE_INCIDENTS.items():
+        if code not in seen_ids:
+            sev_raw = (act.get("severity") or "CRITICAL").upper()
+            sev_num = 1 if sev_raw in ("P1", "CRITICAL") else (2 if sev_raw in ("P2", "HIGH") else 3)
+            created = act.get("created_at")
+            opened_at_str = created.isoformat() if isinstance(created, datetime) else str(created or datetime.now(timezone.utc).isoformat())
+            results.append({
+                "id": code,
+                "severity": sev_num,
+                "service": act.get("service_name", "checkout-api"),
+                "title": act.get("symptom", "p99 latency above 2s on checkout"),
+                "summary": act.get("symptom", "p99 latency above 2s on checkout"),
+                "opened_at": opened_at_str,
+                "status": act.get("status", "investigating"),
+                "alert": {
+                    "metric": "p99_latency",
+                    "value": "6.2s",
+                    "threshold": "2s",
+                    "fired_at": "03:14 IST",
+                },
+            })
+
+    return results
+
+
+@router.get(
+    "/{incident_id}",
+    summary="Get Incident Detail for Frontend Triage",
+)
+async def get_incident(
+    incident_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> Dict[str, Any]:
+    """
+    Returns incident metadata for a single incident (used by triage and comparison pages).
+    """
+    repo = SQLAlchemyRepository(session)
+    inc = await repo.get_incident(incident_id)
+    if inc:
+        sev_raw = (inc.get("severity") or "P1").upper()
+        sev_num = 1 if sev_raw in ("P1", "CRITICAL") else (2 if sev_raw in ("P2", "HIGH") else 3)
+        return {
+            "id": inc.get("code", incident_id),
+            "severity": sev_num,
+            "service": inc.get("service_name", "checkout-api"),
+            "title": inc.get("root_cause") or inc.get("code", incident_id),
+            "summary": inc.get("symptom", "Operational incident degradation"),
+            "opened_at": inc.get("opened_at") or datetime.now(timezone.utc).isoformat(),
+            "status": inc.get("status", "open"),
+            "alert": {
+                "metric": "p99_latency",
+                "value": "6.2s",
+                "threshold": "2s",
+                "fired_at": "03:14 IST",
+            },
+        }
+
+    act = ACTIVE_INCIDENTS.get(incident_id)
+    if act:
+        sev_raw = (act.get("severity") or "CRITICAL").upper()
+        sev_num = 1 if sev_raw in ("P1", "CRITICAL") else (2 if sev_raw in ("P2", "HIGH") else 3)
+        created = act.get("created_at")
+        opened_at_str = created.isoformat() if isinstance(created, datetime) else str(created or datetime.now(timezone.utc).isoformat())
+        return {
+            "id": incident_id,
+            "severity": sev_num,
+            "service": act.get("service_name", "checkout-api"),
+            "title": act.get("symptom", "p99 latency above 2s on checkout"),
+            "summary": act.get("symptom", "p99 latency above 2s on checkout"),
+            "opened_at": opened_at_str,
+            "status": act.get("status", "investigating"),
+            "alert": {
+                "metric": "p99_latency",
+                "value": "6.2s",
+                "threshold": "2s",
+                "fired_at": "03:14 IST",
+            },
+        }
+
+    raise IncidentNotFoundError(f"Incident {incident_id} not found")

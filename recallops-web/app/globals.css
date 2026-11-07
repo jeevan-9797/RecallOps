@@ -1,0 +1,37 @@
+/* Hallmark · checked: 2026-11-06 · genre: modern-minimal · scope: app
+ * floor: tokens, focus, motion, overflow, no tracked caps · built from the polished Stitch screens
+ * built: the project · redesign: polish · v2.0.0 */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --focus: #1E3A8A;
+  --field: #8C857F;
+}
+
+html, body { overflow-x: clip; }
+body { overscroll-behavior: none; }
+
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible,
+select:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  transition: none;
+}
+.toggle:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 6px; }
+
+button { white-space: nowrap; }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+input:not([type=checkbox]):not([type=radio]), textarea { border-color: var(--field); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* New agent steps fade in; nothing else moves. */
+@keyframes step-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.step-in { animation: step-in 220ms ease-out both; }

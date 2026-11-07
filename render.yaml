@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: recallops-api
+    runtime: python
+    plan: free
+    branch: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.10
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG_MODE
+        value: "false"
+      - key: HINDSIGHT_ENABLED
+        value: "false"
+      - key: PRIMARY_MODEL
+        value: openai/gpt-oss-120b
+      - key: SECONDARY_MODEL
+        value: qwen/qwen3-32b
+      - key: BAND_API_BASE_URL
+        value: https://app.band.ai
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DEMO_RESET_TOKEN
+        sync: false

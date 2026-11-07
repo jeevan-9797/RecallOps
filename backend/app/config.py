@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     DEBUG_MODE: bool = Field(default=False, description="Enable verbose debug logging")
     LOG_LEVEL: str = Field(default="INFO", description="Logging verbosity")
     PORT: int = Field(default=8000, description="Server listening port")
+    DEMO_RESET_TOKEN: Optional[str] = Field(
+        default=None,
+        description="Secret token required to invoke POST /api/demo/reset in production",
+    )
 
     # Groq LLM Configuration
     GROQ_API_KEY: Optional[str] = Field(default=None, description="API Key for Groq cloud inference")
@@ -34,8 +38,9 @@ class Settings(BaseSettings):
     SECONDARY_MODEL: str = Field(default="qwen/qwen3-32b", description="Fallback low-latency model")
 
     # Hindsight Cloud Dual-Memory Configuration
+    HINDSIGHT_ENABLED: bool = Field(default=False, description="Enable live Hindsight Cloud operations")
     HINDSIGHT_API_KEY: Optional[str] = Field(default=None, description="Hindsight Cloud API key")
-    HINDSIGHT_ENDPOINT: str = Field(default="https://api.hindsight.cloud/v1", description="Hindsight base URL")
+    HINDSIGHT_ENDPOINT: str = Field(default="https://api.hindsight.vectorize.io", description="Hindsight base URL")
     HINDSIGHT_BANK_ID: str = Field(default="kartly-sre", description="Approved default Hindsight memory bank ID")
 
     # Database Configuration (PostgreSQL Docker / Supabase)
@@ -79,8 +84,13 @@ class Settings(BaseSettings):
         return bool(self.GROQ_API_KEY and self.GROQ_API_KEY.strip() and not self.GROQ_API_KEY.startswith("your_"))
 
     def is_hindsight_ready(self) -> bool:
-        """Returns True if Hindsight Cloud API key is present and non-empty."""
-        return bool(self.HINDSIGHT_API_KEY and self.HINDSIGHT_API_KEY.strip() and not self.HINDSIGHT_API_KEY.startswith("your_"))
+        """Returns True only if Hindsight is explicitly enabled AND API key is present."""
+        return bool(
+            self.HINDSIGHT_ENABLED
+            and self.HINDSIGHT_API_KEY
+            and self.HINDSIGHT_API_KEY.strip()
+            and not self.HINDSIGHT_API_KEY.startswith("your_")
+        )
 
     def is_supabase_ready(self) -> bool:
         """Returns True if Supabase URL and Key are present."""

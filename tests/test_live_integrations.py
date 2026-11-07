@@ -11,12 +11,14 @@ from backend.app.services.hindsight_service import HindsightService
 
 
 def is_live_groq_available() -> bool:
-    key = os.getenv("GROQ_API_KEY")
+    key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY")
     return bool(key and key != "your_groq_api_key_here" and len(key) > 10)
 
 
 def is_live_hindsight_available() -> bool:
-    key = os.getenv("HINDSIGHT_API_KEY")
+    if not settings.is_hindsight_ready():
+        return False
+    key = os.getenv("HINDSIGHT_API_KEY") or settings.HINDSIGHT_API_KEY
     return bool(key and key != "your_hindsight_api_key_here" and len(key) > 10)
 
 

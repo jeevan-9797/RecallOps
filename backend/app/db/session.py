@@ -36,6 +36,12 @@ def get_async_engine(database_url: Optional[str] = None) -> AsyncEngine:
         elif url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+        # Normalize libpq sslmode parameter for asyncpg compatibility
+        if "sslmode=require" in url:
+            url = url.replace("sslmode=require", "ssl=require")
+        elif "sslmode=" in url:
+            url = url.replace("sslmode=", "ssl=")
+
         connect_args = {}
         extra_kwargs = {}
         if url.startswith("sqlite"):
