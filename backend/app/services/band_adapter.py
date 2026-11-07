@@ -311,20 +311,29 @@ class RealBandAdapter(BandAdapterInterface):
             self.last_error = str(err)
             return False
 
-        # 5. Attempt Delivery with Bounded Retries & Timeout
+        # 5. Attempt Delivery with Bounded Retries & Total Delivery Timeout Budget
         attempt = 0
         backoff = 0.5
+        deadline = time.monotonic() + self.delivery_timeout
+
         while attempt <= self.max_retries:
             attempt += 1
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                err_msg = f"Total delivery timeout of {self.delivery_timeout}s timed out before attempt {attempt}"
+                logger.warning(f"[BAND TIMEOUT] {err_msg}")
+                self.last_error = err_msg
+                break
+
             try:
-                # Total delivery timeout per attempt
+                # Bounded by remaining time in total delivery budget
                 await asyncio.wait_for(
                     client.agent_api_messages.create_agent_chat_message(
                         chat_id=room_id,
                         message=request_payload,
                         request_options=DEFAULT_REQUEST_OPTIONS,
                     ),
-                    timeout=self.delivery_timeout,
+                    timeout=remaining,
                 )
 
                 # Successful delivery
@@ -338,11 +347,13 @@ class RealBandAdapter(BandAdapterInterface):
                 return True
 
             except asyncio.TimeoutError:
-                err_msg = f"Delivery timed out after {self.delivery_timeout}s (attempt {attempt}/{self.max_retries + 1})"
+                err_msg = f"Delivery timed out (attempt {attempt}/{self.max_retries + 1}, budget {self.delivery_timeout}s)"
                 logger.warning(f"[BAND TIMEOUT] {err_msg}")
                 self.last_error = err_msg
                 if attempt <= self.max_retries:
-                    await asyncio.sleep(backoff)
+                    sleep_time = min(backoff, max(0.0, deadline - time.monotonic()))
+                    if sleep_time > 0:
+                        await asyncio.sleep(sleep_time)
                     backoff *= 2
                 continue
 
@@ -366,7 +377,9 @@ class RealBandAdapter(BandAdapterInterface):
                 )
                 self.last_error = sanitized_err
                 if attempt <= self.max_retries:
-                    await asyncio.sleep(backoff)
+                    sleep_time = min(backoff, max(0.0, deadline - time.monotonic()))
+                    if sleep_time > 0:
+                        await asyncio.sleep(sleep_time)
                     backoff *= 2
                 continue
 
